@@ -1,0 +1,6 @@
+.venv
+computer_use_agent/.env
+computer_use_agent/.adk
+computer_use_agent/__pycache__
+BRD.md
+SDD.md

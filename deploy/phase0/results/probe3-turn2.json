@@ -1,0 +1,53 @@
+{
+  "message": {
+    "contextId": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/15301453483600566158",
+    "role": "ROLE_AGENT",
+    "content": [
+      {
+        "text": "收到确认，等了 7.5 秒。上一轮问的是「稽核 XX 店 昨天 14:00-15:00」。同一个实例 398fc6b3-pid1，session_id 传回来了。"
+      }
+    ],
+    "metadata": {
+      "answer": {
+        "state": "SUCCEEDED",
+        "name": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/15301453483600566158/assistAnswers/1386003125115141079",
+        "diagnosticInfo": {
+          "plannerSteps": [
+            {
+              "queryStep": {
+                "parts": [
+                  {
+                    "text": "确认"
+                  }
+                ]
+              },
+              "createTime": "2026-09-03T08:12:57.527668236Z"
+            },
+            {
+              "planStep": {
+                "planStepId": "14644276358304379793",
+                "role": "MODEL",
+                "parts": [
+                  {
+                    "text": "收到确认，等了 7.5 秒。上一轮问的是「稽核 XX 店 昨天 14:00-15:00」。同一个实例 398fc6b3-pid1，session_id 传回来了。"
+                  }
+                ]
+              },
+              "createTime": "2026-09-03T08:12:57.770579091Z"
+            }
+          ]
+        }
+      },
+      "sessionInfo": {
+        "session": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/15301453483600566158",
+        "queryId": "1386003125115139123",
+        "turnId": "15301453483600566158_1386003125115140636"
+      },
+      "agentInfo": {
+        "agent": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/assistants/default_assistant/agents/16091433261218097511",
+        "displayName": "CCTV 稽核探针"
+      },
+      "assistToken": "NMwKDAiI2OTUBhCUz5SaAhIkNmE5OGViMTYtMDAwMC0yNTRkLTg1NDYtNTgyNDI5YWFjZmVj"
+    }
+  }
+}

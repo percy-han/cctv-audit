@@ -1,0 +1,18 @@
+{
+  "error": {
+    "code": 400,
+    "message": "Agent failed with error: Reasoning Engine Execution Service stream failed with status code DEADLINE_EXCEEDED: ",
+    "status": "FAILED_PRECONDITION",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "REMOTE_AGENT_FAILURE",
+        "domain": "discoveryengine.googleapis.com"
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.RequestInfo",
+        "requestId": "assist_token:NMwKDAib2OTUBhCzvJ3cARIkNmE5OGViMDUtMDAwMC0yMTAyLTg1NDQtNTgyNDI5YTk3ODQw"
+      }
+    ]
+  }
+}

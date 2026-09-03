@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": 400,
+    "message": "Reasoning Engine Execution failed.\nPlease refer to our documentation (https://cloud.google.com/vertex-ai/generative-ai/docs/agent-engine/troubleshooting/use) for checking logs and other troubleshooting tips.\nError Details: ",
+    "status": "FAILED_PRECONDITION"
+  }
+}
+
+elapsed=896s

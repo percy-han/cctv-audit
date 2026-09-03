@@ -1,0 +1,82 @@
+============================================================
+ Phase 0 timeout measurement
+ target: https://us-central1-aiplatform.googleapis.com/v1/projects/596821501265/locations/us-central1/reasoningEngines/645797604818419712
+ mode:   deployed
+============================================================
+
+Reachability ... ✅ instance c484e483-pid1
+
+------------------------------------------------------------
+ hang 60s  (client will wait up to 180s)
+------------------------------------------------------------
+  client: ✅ answered after 61s
+  server: work completed on the server
+
+------------------------------------------------------------
+ hang 300s  (client will wait up to 420s)
+------------------------------------------------------------
+  client: ✅ answered after 301s
+  server: work completed on the server
+
+------------------------------------------------------------
+ hang 900s  (client will wait up to 1020s)
+------------------------------------------------------------
+  client: ❌ cut at 896s
+          {
+            "error": {
+              "code": 400,
+  server: work completed on the server
+
+------------------------------------------------------------
+ hang 1800s  (client will wait up to 1920s)
+------------------------------------------------------------
+  client: ❌ cut at 896s
+          {
+            "error": {
+              "code": 400,
+  server: work completed on the server
+
+------------------------------------------------------------
+ stream 1800s, heartbeat every 10s
+------------------------------------------------------------
+  received 61 heartbeats in 602s (expected ~180)
+
+------------------------------------------------------------
+ Egress
+------------------------------------------------------------
+  {
+    "output": {
+      "ok": true,
+      "results": [
+        {
+          "elapsed_seconds": 0.02,
+          "reachable": true,
+          "url": "https://www.google.com/generate_204",
+          "bytes": 0,
+          "status": 204
+        },
+        {
+          "reachable": true,
+          "bytes": 117761,
+          "elapsed_seconds": 0.65,
+          "status": 200,
+          "url": "https://www.bilibili.com"
+        }
+      ],
+      "verdict": "container has internet egress",
+      "instance": "c484e483-pid1"
+    }
+  }
+
+
+============================================================
+ Summary
+============================================================
+PROBE            CLIENT SAW                   SERVER SAYS
+hang 60s         answered after 61s           work completed on the server
+hang 300s        answered after 301s          work completed on the server
+hang 900s        cut at 896s                  work completed on the server
+hang 1800s       cut at 896s                  work completed on the server
+stream 1800s     61/180 heartbeats in 602s    -
+
+Record these in deploy/phase0/README.md before moving to Phase 1.

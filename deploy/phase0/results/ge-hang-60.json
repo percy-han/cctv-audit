@@ -1,0 +1,53 @@
+{
+  "message": {
+    "contextId": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/7597614492361326429",
+    "role": "ROLE_AGENT",
+    "content": [
+      {
+        "text": "挂了 60.0 秒后返回（要求 60.0 秒），实例 398fc6b3-pid1。"
+      }
+    ],
+    "metadata": {
+      "agentInfo": {
+        "displayName": "CCTV 稽核探针",
+        "agent": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/assistants/default_assistant/agents/16091433261218097511"
+      },
+      "sessionInfo": {
+        "session": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/7597614492361326429",
+        "turnId": "7597614492361326429_3752054392958441462",
+        "queryId": "3752054392958442867"
+      },
+      "assistToken": "NMwKDAig2OTUBhDE-PmbAhIkNmE5OGU3MjAtMDAwMC0yMWQ0LWFjYWYtM2MyODZkMzNmZmQ2",
+      "answer": {
+        "state": "SUCCEEDED",
+        "diagnosticInfo": {
+          "plannerSteps": [
+            {
+              "createTime": "2026-09-03T08:13:21.088810917Z",
+              "queryStep": {
+                "parts": [
+                  {
+                    "text": "挂 60 秒"
+                  }
+                ]
+              }
+            },
+            {
+              "planStep": {
+                "parts": [
+                  {
+                    "text": "挂了 60.0 秒后返回（要求 60.0 秒），实例 398fc6b3-pid1。"
+                  }
+                ],
+                "planStepId": "3395583372718918164",
+                "role": "MODEL"
+              },
+              "createTime": "2026-09-03T08:14:21.393125615Z"
+            }
+          ]
+        },
+        "name": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/7597614492361326429/assistAnswers/3752054392958441343"
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+POST https://discoveryengine.googleapis.com/v1/projects/study-project-496907/locations/global/collections/default_collection/engines/cctv-audit/assistants/default_assistant/agents/16091433261218097511/a2a/v1/message:send
+{
+  "request": {
+    "messageId": "probe-1788423194",
+    "role": "ROLE_USER",
+    "content": [
+      {
+        "text": "挂 3600 秒"
+      }
+    ]
+  }
+}
+
+  HTTP 400 after 602.8s, 586 bytes
+
+
+saved: /home/admin_percyhan_altostrat_com/Code/cctv-audit/deploy/phase0/results/ge-hang-3600.json

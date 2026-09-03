@@ -1,0 +1,9 @@
+# Phase 0 probe container — deliberately minimal.
+#
+# Nothing here that could itself be the reason a probe fails. No Chromium, no
+# ffmpeg, no Vertex client: if this image misbehaves on Agent Runtime, the
+# platform is the cause, and that is the entire point of the exercise.
+
+fastapi>=0.110.0
+uvicorn>=0.29.0
+aiohttp>=3.9.0

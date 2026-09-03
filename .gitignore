@@ -1,6 +1,21 @@
 .venv
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/
+
 computer_use_agent/.env
 computer_use_agent/.adk
-computer_use_agent/__pycache__
+
+# Live session cookies. Never commit these.
+auth/
+
+# Scratch: ffmpeg segments and window clips.
+.work/
+
+# Audit output: records and evidence frames contain footage of identifiable
+# people, so they stay local.
+computer_use_agent/checkpoints/
+
 BRD.md
 SDD.md

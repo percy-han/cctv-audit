@@ -1,0 +1,21 @@
+# CCTV Audit Agent — Python dependencies
+#
+# System dependency (NOT installable via pip):
+#   ffmpeg >= 4.4    apt install ffmpeg  /  brew install ffmpeg
+#
+# Install:
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements.txt
+#   playwright install chromium
+
+google-genai>=1.0.0
+google-adk>=1.0.0
+google-auth>=2.0.0
+playwright>=1.40.0
+certifi>=2024.2.2
+aiohttp>=3.9.0
+fastapi>=0.110.0
+uvicorn>=0.29.0
+pydantic>=2.6.0
+python-dotenv>=1.0.0
+PyYAML>=6.0

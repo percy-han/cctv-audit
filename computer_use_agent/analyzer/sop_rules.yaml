@@ -1,0 +1,114 @@
+# CHAGEE (霸王茶姬) 门店 CCTV 远程稽核规则
+# 依据《亚太稽核远程 CCTV 巡检业务流程》
+#
+# 这份文件是稽核标准的唯一来源，改规则不需要改代码。
+#
+# 字段说明：
+#   id                  规则编号，会写进每条记录，用于统计与追溯
+#   name                中文规则名
+#   description         判定标准正文，会原样进入 prompt
+#   severity            命中违规时的严重度：RED_LINE | NORMAL
+#   detection_type      presence  = 看到某个动作/状态即违规（举证容易）
+#                       absence   = 整段窗口都没看到某个必做动作才算违规（举证困难）
+#   positive_indicators 合规的视觉特征
+#   negative_indicators 违规的视觉特征
+#   requires_full_context
+#                       true 表示该规则依赖完整窗口。窗口内视线被遮挡、
+#                       人员走出画面、或该动作的完整过程没看全时，一律判
+#                       CANNOT_DETERMINE 而不是 VIOLATION。
+#
+# 为什么要区分 presence / absence：
+#   五条规则里有四条是"缺失类"（未洗手、未冲洗、未加盖、看手机）。缺失类
+#   命题在单帧上不可证伪 —— 这正是旧实现产出假违规的根因。现在整段窗口都
+#   送进模型，缺失类判定才第一次具备成立的条件，但仍需 requires_full_context
+#   把"没看清"和"确实没做"区分开。
+
+version: 1
+
+rules:
+  - id: CHK_ATTIRE_001
+    name: 着装仪容规范
+    severity: RED_LINE
+    detection_type: presence
+    requires_full_context: false
+    description: >-
+      员工必须规范佩戴工帽（碎发全部塞入帽内）、规范佩戴口罩（严禁露鼻或露嘴）、
+      穿着统一工装。口罩滑落至鼻下、下巴，或工帽外露头发，均属违规。
+    positive_indicators:
+      - 口罩完整覆盖口鼻，鼻夹贴合
+      - 工帽戴正，无碎发外露
+      - 穿着统一工装
+    negative_indicators:
+      - 口罩下滑露出鼻孔或嘴部
+      - 口罩挂在下巴或耳朵上
+      - 未戴工帽，或额前、耳后有明显散落头发
+      - 便装上岗
+
+  - id: CHK_HYGIENE_002
+    name: 手部卫生红线
+    severity: RED_LINE
+    detection_type: absence
+    requires_full_context: true
+    description: >-
+      接触非洁净物（手机、垃圾桶、地面、抹布、身体、头发、口罩表面、钱款）后，
+      必须先洗手或更换食品级手套，才能继续接触食品、器具或杯口。
+      严禁直接用手触碰杯口内侧、吸管内侧或裸露食材。
+      仅当窗口内完整看到"接触污染源 → 未洗手/未换手套 → 接触食品或器具"这一连串动作时，
+      才可判定 VIOLATION。
+    positive_indicators:
+      - 接触污染源后走向洗手池并完成洗手
+      - 摘除并更换新手套后再接触食品
+    negative_indicators:
+      - 摸手机/头发/围裙后直接拿取杯子、冰勺或食材
+      - 徒手接触杯口内侧或吸管内侧
+      - 戴着同一副手套处理垃圾后继续制作饮品
+
+  - id: CHK_TEA_001
+    name: 器具规范使用
+    severity: NORMAL
+    detection_type: absence
+    requires_full_context: true
+    description: >-
+      雪克杯、量杯、巴勺等器具在使用前后必须冲淋冲洗；严禁不同物料混用同一器具
+      造成串味或生熟交叉污染。仅当窗口内看到器具从一种物料直接转用到另一种物料
+      且中间没有冲洗动作时，才可判定 VIOLATION。
+    positive_indicators:
+      - 器具使用后放入冲洗池冲淋
+      - 不同物料使用各自专用器具
+    negative_indicators:
+      - 雪克杯做完一杯后未冲洗直接做下一杯
+      - 同一把巴勺在不同料桶之间直接转用
+
+  - id: CHK_SANITATION_003
+    name: 操作台与物料管理
+    severity: NORMAL
+    detection_type: presence
+    requires_full_context: false
+    description: >-
+      操作台面应整洁、无积水、无散落物料；抹布分区摆放不随意搭放；
+      物料容器随手加盖，原料不长时间敞口暴露。
+    positive_indicators:
+      - 台面干净，物料归位
+      - 料桶盖子处于闭合状态
+      - 抹布置于指定位置
+    negative_indicators:
+      - 台面明显积水、洒落茶渣或糖浆
+      - 料桶、糖浆瓶长时间敞口
+      - 抹布随意搭在料桶、杯架或台面食品接触区
+
+  - id: CHK_BEHAVIOR_004
+    name: 操作纪律红线
+    severity: RED_LINE
+    detection_type: presence
+    requires_full_context: false
+    description: >-
+      操作期间严禁看手机、吃东西、聊天嬉闹或无故脱岗。
+      注意区分：使用门店点单平板或收银终端属于正常工作，不是违规。
+    positive_indicators:
+      - 专注于制作或接待
+      - 使用点单平板/收银机等门店设备
+    negative_indicators:
+      - 手持个人手机查看屏幕
+      - 在操作台前进食或饮用非工作饮品
+      - 多人聚集聊天且无人处理订单
+      - 操作岗位长时间无人

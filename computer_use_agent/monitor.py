@@ -17,10 +17,13 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 import time
 from typing import Any, Dict, List, Optional
 import aiohttp
+
+logger = logging.getLogger("cctv_audit.monitor")
 
 # HTML Page for the Frontend Monitor with CCTV Video Audit Right Sidebar
 HTML_PAGE = """<!DOCTYPE html>
@@ -620,12 +623,26 @@ HTML_PAGE = """<!DOCTYPE html>
         <span>SOP违规:</span>
         <span id="violation-count" class="meta-val badge-viol">0 项</span>
       </div>
-      <div class="meta-item">
-        <span>轮次:</span>
-        <span id="turn-count" class="meta-val">0 / 100</span>
-      </div>
     </div>
   </header>
+
+  <!-- Human-in-the-loop gate: shown when a CAPTCHA / OTP blocks the pipeline -->
+  <div id="intervention-bar" style="display:none; align-items:center; gap:14px; padding:10px 18px; background:#7c2d12; border-bottom:1px solid #ea580c; color:#fed7aa; font-size:0.88rem;">
+    <span style="font-size:1.1rem;">🖐️</span>
+    <div style="flex:1;">
+      <strong>需要人工验证</strong> —
+      <span id="intervention-reason">检测到验证码</span>
+      <div style="font-size:0.78rem; opacity:0.85; margin-top:2px;">
+        大屏只能看画面、不能操作浏览器。可行的做法：在自己电脑上登录一次该平台，把
+        <code>storage_state</code> 放进 <code>AUTH_STATE_DIR</code> 后重跑；或设
+        <code>BROWSER_HEADLESS=false</code> 在有图形界面的机器上手动完成。
+        若确认画面里其实没有验证码，直接点右侧按钮继续即可。
+      </div>
+    </div>
+    <button onclick="resolveIntervention()" style="padding:7px 16px; background:#ea580c; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:0.85rem;">
+      已完成，继续
+    </button>
+  </div>
 
   <!-- Main Container -->
   <div class="container">
@@ -659,8 +676,6 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="tab-header">
         <button class="tab-btn active" onclick="switchTab('segments')">📹 视频分段巡检 (<span id="tab-seg-count">0</span>)</button>
         <button id="btn-tab-viol" class="tab-btn tab-viol" onclick="switchTab('violations')">⚠️ SOP违规清单 (<span id="tab-viol-count">0</span>)</button>
-        <button class="tab-btn" onclick="switchTab('timeline')">🛠️ 动作序列</button>
-        <button class="tab-btn" onclick="switchTab('reasoning')">🧠 AI 推理</button>
         <button class="tab-btn" onclick="switchTab('result')">📑 最终报告</button>
       </div>
 
@@ -668,7 +683,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <div id="tab-segments" class="tab-content">
         <div class="card" style="padding: 10px 14px; background: #182234; border-color: #2563eb;">
           <div style="display: flex; align-items: center; justify-content: space-between; font-size: 0.82rem;">
-            <span style="font-weight: 600; color: #93c5fd;">🎯 1分钟视频抽检进行中</span>
+            <span id="audit-headline" style="font-weight: 600; color: #93c5fd;">🎯 视频抽检</span>
             <span id="audit-stats" style="font-family: 'JetBrains Mono', monospace; color: var(--text-muted);">已分析 0 个片段</span>
           </div>
           <div id="prompt-display" style="font-size: 0.78rem; color: var(--text-muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
@@ -697,26 +712,6 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Tab: Action Timeline -->
-      <div id="tab-timeline" class="tab-content" style="display: none;">
-        <div class="card" style="flex: 1; display: flex; flex-direction: column;">
-          <div class="card-title">Browser Use 自动化指令序列</div>
-          <div id="timeline-list" style="flex: 1; overflow-y: auto;">
-            <div class="empty-placeholder">等待动作记录...</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Tab: Reasoning -->
-      <div id="tab-reasoning" class="tab-content" style="display: none;">
-        <div class="card" style="flex: 1;">
-          <div class="card-title">Gemini 多模态视觉思考过程 (Reasoning)</div>
-          <div id="reasoning-display" class="card-body" style="color: #9cdcfe; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem;">
-            等待模型推理...
-          </div>
-        </div>
-      </div>
-
       <!-- Tab: Final Result -->
       <div id="tab-result" class="tab-content" style="display: none;">
         <div class="card" style="flex: 1;">
@@ -737,13 +732,10 @@ HTML_PAGE = """<!DOCTYPE html>
     const statusBadge = document.getElementById('status-badge');
     const statusText = document.getElementById('status-text');
     const urlText = document.getElementById('current-url');
-    const turnCount = document.getElementById('turn-count');
     const hudActionName = document.getElementById('hud-action-name');
     const hudActionDesc = document.getElementById('hud-action-desc');
     const promptDisplay = document.getElementById('prompt-display');
-    const reasoningDisplay = document.getElementById('reasoning-display');
     const resultDisplay = document.getElementById('result-display');
-    const timelineList = document.getElementById('timeline-list');
     const segmentList = document.getElementById('segment-list');
     const violationList = document.getElementById('violation-list');
     const segmentCountEl = document.getElementById('segment-count');
@@ -752,6 +744,7 @@ HTML_PAGE = """<!DOCTYPE html>
     const tabViolCountEl = document.getElementById('tab-viol-count');
     const btnTabViol = document.getElementById('btn-tab-viol');
     const auditStats = document.getElementById('audit-stats');
+    const auditHeadline = document.getElementById('audit-headline');
 
     let currentTab = 'segments';
     let segmentsData = [];
@@ -759,8 +752,8 @@ HTML_PAGE = """<!DOCTYPE html>
 
     function switchTab(tabName) {
       currentTab = tabName;
-      const tabNames = ['segments', 'violations', 'timeline', 'reasoning', 'result'];
-      document.querySelectorAll('tab-btn').forEach((btn, i) => {
+      const tabNames = ['segments', 'violations', 'result'];
+      document.querySelectorAll('.tab-btn').forEach((btn, i) => {
         btn.classList.toggle('active', tabNames[i] === tabName);
       });
       tabNames.forEach(name => {
@@ -804,6 +797,38 @@ HTML_PAGE = """<!DOCTYPE html>
         if (msg.state) updateState(msg.state);
       } else if (msg.type === 'segment') {
         addSegment(msg.segment);
+      } else if (msg.type === 'intervention') {
+        showIntervention(msg.reason);
+      } else if (msg.type === 'intervention_cleared') {
+        hideIntervention();
+      }
+    }
+
+    // -- Human-in-the-loop gate ------------------------------------------
+    // We do not automate CAPTCHAs. When one appears the pipeline suspends and
+    // asks a person to clear it in the live view, then continue.
+    function showIntervention(reason) {
+      const bar = document.getElementById('intervention-bar');
+      if (!bar) return;
+      document.getElementById('intervention-reason').textContent = reason || '需要人工完成验证';
+      bar.style.display = 'flex';
+    }
+
+    function hideIntervention() {
+      const bar = document.getElementById('intervention-bar');
+      if (bar) bar.style.display = 'none';
+    }
+
+    async function resolveIntervention() {
+      try {
+        await fetch('/api/interact', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'resolve' }),
+        });
+        hideIntervention();
+      } catch (e) {
+        console.error('Could not signal the pipeline', e);
       }
     }
 
@@ -825,23 +850,17 @@ HTML_PAGE = """<!DOCTYPE html>
       }
 
       if (s.prompt) promptDisplay.textContent = s.prompt;
+      if (s.capture_settings !== undefined) {
+        auditHeadline.textContent = s.capture_settings ? `🎯 ${s.capture_settings}` : '🎯 视频抽检';
+      }
       if (s.current_url) urlText.textContent = s.current_url;
-      turnCount.textContent = `${s.turn || 0} / ${s.max_turns || 100}`;
-
       if (s.last_action) {
         hudActionName.textContent = s.last_action;
-        hudActionDesc.textContent = (s.last_action_args && s.last_action_args.intent) || (s.current_reasoning && s.current_reasoning.slice(0, 100)) || '正在执行抽检动作';
+        hudActionDesc.textContent = (s.last_action_args && s.last_action_args.intent) || '正在执行抽检动作';
       }
 
-      if (s.current_reasoning) {
-        reasoningDisplay.textContent = s.current_reasoning;
-      }
       if (s.final_result) {
         resultDisplay.textContent = s.final_result;
-      }
-
-      if (s.timeline && s.timeline.length > 0) {
-        renderTimeline(s.timeline);
       }
 
       if (s.video_segments && s.video_segments.length > 0) {
@@ -916,11 +935,48 @@ HTML_PAGE = """<!DOCTYPE html>
               <div style="margin-top: 2px;">${seg.violation_detail}</div>
             </div>
           ` : ''}
+          ${renderFindings(seg)}
         `;
         segmentList.appendChild(div);
       });
       const tabEl = document.getElementById('tab-segments');
       if (tabEl) tabEl.scrollTop = tabEl.scrollHeight;
+    }
+
+    const STATUS_MARK = { VIOLATION: '❌', COMPLIANT: '✅', CANNOT_DETERMINE: '❔' };
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g,
+        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    // Per-rule verdicts. CANNOT_DETERMINE is shown rather than hidden: "we
+    // could not see it" is a real audit outcome and hiding it would make
+    // coverage look better than it is.
+    function renderFindings(seg) {
+      if (!seg.findings || !seg.findings.length) return '';
+      const rows = seg.findings.map(f => `
+        <div style="display:flex; gap:6px; align-items:baseline; padding:2px 0;">
+          <span>${STATUS_MARK[f.status] || '•'}</span>
+          <span style="font-family:'JetBrains Mono',monospace; font-size:0.72rem; color:var(--text-muted);">${escapeHtml(f.rule_id)}</span>
+          <span style="flex:1; font-size:0.78rem;">${escapeHtml(f.evidence) || '—'}</span>
+          <span style="font-size:0.7rem; color:var(--text-muted);">${escapeHtml(f.timestamp || '')} · ${Math.round((f.confidence || 0) * 100)}%</span>
+        </div>
+      `).join('');
+      return `<div style="margin-top:6px; border-top:1px dashed #334155; padding-top:6px;">${rows}</div>`;
+    }
+
+    function renderEvidence(v) {
+      const frames = (v.findings || [])
+        .filter(f => f.status === 'VIOLATION' && f.evidence_frame)
+        .map(f => `
+          <a href="/api/evidence/${encodeURI(f.evidence_frame)}" target="_blank" title="${escapeHtml(f.rule_id)} @ ${escapeHtml(f.timestamp || '')}">
+            <img src="/api/evidence/${encodeURI(f.evidence_frame)}"
+                 style="width:132px; border-radius:5px; border:1px solid #475569;" loading="lazy">
+          </a>
+        `);
+      if (!frames.length) return '';
+      return `<div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">${frames.join('')}</div>`;
     }
 
     function renderViolations() {
@@ -950,8 +1006,9 @@ HTML_PAGE = """<!DOCTYPE html>
             <strong>违规内容：</strong>${v.violation_detail || v.description}
           </div>
           <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px;">
-            视觉证据时间点：${v.time_range} • 现场判定：不符合标准
+            视觉证据时间点：${v.time_range} • 点击证据图可放大复核
           </div>
+          ${renderEvidence(v)}
         `;
         violationList.appendChild(div);
       });
@@ -1003,27 +1060,6 @@ HTML_PAGE = """<!DOCTYPE html>
       }, 2500);
     }
 
-    function renderTimeline(timeline) {
-      timelineList.innerHTML = '';
-      timeline.forEach(item => {
-        const div = document.createElement('div');
-        div.className = 'step-item';
-        div.innerHTML = `
-          <div class="step-dot"></div>
-          <div class="step-content">
-            <div class="step-header">
-              <span class="step-action-name">${item.action}</span>
-              <span class="step-time">[Turn ${item.turn}] ${item.time}</span>
-            </div>
-            ${item.intent ? `<div class="step-intent">${item.intent}</div>` : ''}
-            ${item.url ? `<div class="step-url">${item.url}</div>` : ''}
-          </div>
-        `;
-        timelineList.appendChild(div);
-      });
-      timelineList.scrollTop = timelineList.scrollHeight;
-    }
-
     fetch('/api/state').then(r => r.json()).then(s => updateState(s)).catch(() => {});
     connectWS();
   </script>
@@ -1036,9 +1072,17 @@ class BrowserMonitorClient:
     """Sends browser use frames, action events, and video segment audit results to the monitor server."""
 
     def __init__(self):
-        self.port = int(os.getenv("MONITOR_PORT", "8080"))
+        from .config import config as _config
+
+        self.port = _config.monitor_port
+        self.token = _config.monitor_token
+        self.screen_width = _config.screen_width
+        self.screen_height = _config.screen_height
         self._session: Optional[aiohttp.ClientSession] = None
         self._segments: List[Dict[str, Any]] = []
+        # Frames are the only high-rate event, and the only one worth dropping.
+        self._frame_in_flight = False
+        self._frames_dropped = 0
 
     @property
     def state(self) -> Dict[str, Any]:
@@ -1059,83 +1103,130 @@ class BrowserMonitorClient:
             )
         return self._session
 
-    def _fire_and_forget(self, payload: Dict[str, Any]):
+    def _fire_and_forget(self, payload: Dict[str, Any], on_done=None):
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._post_event(payload))
         except RuntimeError:
-            pass
+            # No loop: the caller is not in async context, so nothing can be
+            # sent. Release the sender rather than wedging it shut forever.
+            if on_done is not None:
+                on_done()
+            return
+        task = loop.create_task(self._post_event(payload))
+        if on_done is not None:
+            task.add_done_callback(lambda _t: on_done())
 
     async def _post_event(self, payload: Dict[str, Any]):
         try:
             session = await self._get_session()
-            async with session.post(f"http://127.0.0.1:{self.port}/api/event", json=payload):
+            headers = {"X-Monitor-Token": self.token} if self.token else {}
+            async with session.post(
+                f"http://127.0.0.1:{self.port}/api/event", json=payload, headers=headers
+            ):
                 pass
         except Exception:
             pass
 
-    def start_session(self, prompt: str, max_turns: int = 100):
+    def start_session(self, prompt: str, settings: str = ""):
         self._segments = []
         self._fire_and_forget({
             "type": "state",
             "data": {
                 "status": "RUNNING",
                 "prompt": prompt,
-                "turn": 0,
-                "max_turns": max_turns,
+                # What this run is actually configured to do. The banner it
+                # feeds used to be a hardcoded string.
+                "capture_settings": settings,
                 "current_url": "about:blank",
-                "current_reasoning": "正在连接浏览器与视频流，准备抽检...",
                 "last_action": "启动浏览器",
-                "timeline": [],
                 "final_result": "",
                 "video_segments": [],
                 "sop_violations": [],
             },
         })
 
-    def add_video_segment(
-        self,
-        time_range: str,
-        description: str,
-        sop_status: str = "COMPLIANT",
-        violation_detail: str = "",
-        severity: str = "NORMAL",
-    ):
-        """Records a video segment audit result and immediately pushes it to the right sidebar."""
-        sop_status_norm = (sop_status or "COMPLIANT").upper()
-        if "VIOLAT" in sop_status_norm or "违规" in sop_status_norm or "不符合" in sop_status_norm:
-            sop_status_norm = "VIOLATION"
-        elif "CANNOT" in sop_status_norm or "UNKNOWN" in sop_status_norm or "无法" in sop_status_norm:
-            sop_status_norm = "CANNOT_DETERMINE"
-        else:
-            sop_status_norm = "COMPLIANT"
+    def push_record(self, record: Dict[str, Any]) -> None:
+        """Renders an AuditStore record onto the dashboard.
 
+        The store owns the record shape; this flattens it into the fields the
+        sidebar renders, and passes `findings` through so per-rule verdicts and
+        evidence frames can be shown.
+        """
+        violations = [f for f in record.get("findings", []) if f.get("status") == "VIOLATION"]
+        detail = "；".join(
+            f"[{f.get('rule_id')}@{f.get('timestamp', '')}] {f.get('evidence', '')}"
+            for f in violations
+        )
         seg = {
-            "id": len(self._segments) + 1,
-            "time_range": time_range.strip(),
-            "description": description.strip(),
-            "sop_status": sop_status_norm,
-            "violation_detail": violation_detail.strip() if violation_detail else "",
-            "severity": severity.upper() if severity else ("RED_LINE" if sop_status_norm == "VIOLATION" else "NONE"),
+            "id": record.get("id"),
+            "time_range": record.get("time_range", ""),
+            # So the dashboard can order cards by video time. Analysis runs
+            # concurrently, so arrival order is whichever window finished
+            # first -- correct, but unreadable as a timeline.
+            "start_seconds": record.get("start_offset_seconds", 0.0),
+            "description": record.get("scene_summary", ""),
+            "sop_status": record.get("sop_status", "COMPLIANT"),
+            "violation_detail": detail,
+            "severity": record.get("severity", "NONE"),
+            "findings": record.get("findings", []),
+            "people_count": record.get("people_count", 0),
+            "visibility_ok": record.get("visibility_ok", True),
             "time": time.strftime("%H:%M:%S"),
         }
         self._segments.append(seg)
-        self._fire_and_forget({
-            "type": "segment",
-            "segment": seg,
-        })
-        # Direct local checkpoint append for zero-loss 24h auditing
+        self._fire_and_forget({"type": "segment", "segment": seg})
+
+    def request_human(self, reason: str) -> None:
+        """Raises the "needs a person" banner on the dashboard."""
+        self._fire_and_forget({"type": "intervention", "reason": reason})
+
+    def clear_human_request(self) -> None:
+        self._fire_and_forget({"type": "intervention_cleared"})
+
+    async def read_intervention(self) -> tuple:
+        """Reads back the banner the dashboard is showing, for `HumanGate`.
+
+        Returns `(reachable, banner_text_or_None)`. The two are separate because
+        "no banner" and "no dashboard" must not be confused: the first means the
+        operator pressed 继续, the second means nobody is watching.
+        """
         try:
-            ckpt_dir = os.path.join(os.path.dirname(__file__), "checkpoints")
-            os.makedirs(ckpt_dir, exist_ok=True)
-            with open(os.path.join(ckpt_dir, "audit_records.jsonl"), "a", encoding="utf-8") as f:
-                f.write(json.dumps(seg, ensure_ascii=False) + "\n")
+            session = await self._get_session()
+            headers = {"X-Monitor-Token": self.token} if self.token else {}
+            async with session.get(
+                f"http://127.0.0.1:{self.port}/api/state", headers=headers
+            ) as response:
+                if response.status != 200:
+                    return False, None
+                data = await response.json()
+            return True, data.get("intervention")
         except Exception:
-            pass
-        print(f"📹 [Monitor Right Sidebar] New Segment Added: [{time_range}] Status: {sop_status_norm} - {description[:60]}")
+            return False, None
+
+    def note(self, action: str, detail: str = "") -> None:
+        """Says what the run is doing, in the dashboard's action banner."""
+        self._fire_and_forget({
+            "type": "action",
+            "action": {"action": action, "args": {"intent": detail} if detail else {}},
+        })
 
     def update_frame_b64(self, b64_str: str):
-        self._fire_and_forget({"type": "frame", "frame": b64_str})
+        """Pushes a preview frame, skipping it if the last one is still going.
+
+        Without this, a slow link (an SSH tunnel back to a laptop is the normal
+        case here) turns a 15 fps preview into an unbounded pile of pending
+        POST tasks that arrive late, in bursts, and out of order -- which looks
+        worse on the dashboard than simply showing fewer frames. A dropped
+        preview frame costs nothing: the evidence feed is a separate stream.
+        """
+        if self._frame_in_flight:
+            self._frames_dropped += 1
+            return
+        self._frame_in_flight = True
+        self._fire_and_forget({"type": "frame", "frame": b64_str}, on_done=self._frame_sent)
+
+    def _frame_sent(self) -> None:
+        self._frame_in_flight = False
 
     def update_frame_bytes(self, frame_bytes: bytes, url: Optional[str] = None):
         b64_str = base64.b64encode(frame_bytes).decode("ascii")
@@ -1143,18 +1234,6 @@ class BrowserMonitorClient:
             "type": "frame",
             "frame": b64_str,
             "url": url,
-        })
-
-    def set_turn_info(self, turn: int, reasoning: str, actions: List[Any]):
-        action_names = [a.name if hasattr(a, "name") else str(a) for a in actions]
-        last_action = ", ".join(action_names) if action_names else "观察视频画面"
-        self._fire_and_forget({
-            "type": "state",
-            "data": {
-                "turn": turn,
-                "current_reasoning": reasoning,
-                "last_action": last_action,
-            },
         })
 
     def record_action(
@@ -1167,9 +1246,11 @@ class BrowserMonitorClient:
     ):
         click_target = None
         if norm_x is not None and norm_y is not None:
+            # Scale to the configured viewport, not a hardcoded 1080p one, or
+            # the radar marker lands in the wrong place on any other size.
             click_target = {
-                "x": int(norm_x * 1920 / 1000),
-                "y": int(norm_y * 1080 / 1000),
+                "x": int(norm_x * self.screen_width / 1000),
+                "y": int(norm_y * self.screen_height / 1000),
                 "norm_x": norm_x,
                 "norm_y": norm_y,
                 "action": name,

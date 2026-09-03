@@ -1,0 +1,77 @@
+# 调饮操作稽核规则 — 加冰顺序 / 手套 / 口罩帽子
+#
+# 一份独立的稽核标准，不是对 sop_rules.yaml 的修改。用 SOP_RULES_PATH 切换：
+#   SOP_RULES_PATH=computer_use_agent/analyzer/sop_rules.drink_making.yaml
+#
+# 与 sop_rules.yaml 的差别在于覆盖面：那份是《亚太稽核远程 CCTV 巡检业务流程》
+# 的 5 条门店通用项，这份只盯调饮台前的 3 件事，判定粒度更细。
+
+version: 1
+
+# 强制观察清单。模型必须先逐项写下"看到了什么"，才允许进入违规判定。
+# 这是把"严禁基于常识猜测"落到实处的机制：直接问结论，模型会按奶茶店通常
+# 长什么样来回答；先要求它说出手是什么颜色，它就必须真的去看。
+visual_scan:
+  - subject: 面部与衣着
+    question: >-
+      盯住员工的头部和脸部。头顶是有帽子遮挡，还是直接露出头发？
+      嘴巴和鼻子是被口罩遮挡，还是露出面部肤色？分别指出对应的秒数。
+  - subject: 手部
+    question: >-
+      盯住员工的双手。手的颜色是人类皮肤的肉色，还是被其他材质包裹？
+      包裹物是什么颜色（透明 / 蓝色 / 黑色 / 其他 / 没戴）？指出对应的秒数。
+  - subject: 加冰动作
+    question: >-
+      是否出现拿起冰铲、向杯中加入固体冰块的明确肢体动作？
+      若有，冰块是在饮料/辅料之前还是之后入杯？指出对应的秒数。
+
+rules:
+  - id: CHK_ICE_ORDER_001
+    name: 加冰顺序
+    severity: RED_LINE
+    # 顺序错误是看得见的动作，属"出现即违规"；但先后关系必须两个动作都看到，
+    # 所以仍然要求完整过程。
+    detection_type: presence
+    requires_full_context: true
+    description: >-
+      调杯过程中必须放入冰块，且必须先加冰、再加饮料或其他辅料。
+      先加入饮料/辅料、之后才补冰，属于违规。
+      仅当本片段内**同时看到**加冰动作与加料动作、能确认先后顺序时，才可判 VIOLATION；
+      只看到其中一个动作，或看不清杯内已有什么，一律 CANNOT_DETERMINE。
+    positive_indicators:
+      - 先用冰铲向空杯中加入固体冰块，随后才注入饮料或辅料
+    negative_indicators:
+      - 杯中已有饮料/辅料后才加入冰块
+      - 整个调杯过程完整可见但自始至终未加入冰块
+
+  - id: CHK_GLOVE_002
+    name: 蓝色卫生手套
+    severity: RED_LINE
+    detection_type: presence
+    requires_full_context: false
+    description: >-
+      操作期间双手必须佩戴蓝色卫生手套。裸手（可见人类肤色）操作即违规；
+      佩戴非蓝色手套（透明、白色、黑色等）同样不符合本条标准。
+      手部被遮挡或画面模糊到分不清颜色时填 CANNOT_DETERMINE，不要按常理推断。
+    positive_indicators:
+      - 双手表面为均匀的蓝色薄膜，指缝与手腕处可见手套边缘
+    negative_indicators:
+      - 手背/手指呈人类肤色，无任何包裹物
+      - 佩戴透明、白色、黑色或其他非蓝色手套
+
+  - id: CHK_ATTIRE_003
+    name: 口罩与帽子
+    severity: RED_LINE
+    detection_type: presence
+    requires_full_context: false
+    description: >-
+      操作期间必须同时佩戴口罩和工帽。口罩须完整遮盖口鼻，滑至鼻下或挂在
+      下巴均属违规；工帽须罩住头顶，露出成片头发属违规。
+      只要员工面部/头部在本片段中未清晰出现，填 CANNOT_DETERMINE。
+    positive_indicators:
+      - 口罩完整覆盖口鼻，鼻梁处贴合
+      - 头顶被工帽遮盖，无成片头发外露
+    negative_indicators:
+      - 可见鼻孔或嘴唇，未被口罩遮挡
+      - 口罩挂在下巴或单耳
+      - 头顶直接可见头发，无帽子

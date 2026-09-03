@@ -1,6 +1,6 @@
-"""Computer Use Agent Package for Google ADK."""
+"""CCTV video audit agent for Google ADK."""
 
 from .agent import root_agent
-from .agent_loop import agent_loop
+from .pipeline import AuditPipeline, AuditRequest
 
-__all__ = ["root_agent", "agent_loop"]
+__all__ = ["root_agent", "AuditPipeline", "AuditRequest"]

@@ -1,0 +1,7 @@
+# Test-only dependencies. The runtime set is in requirements.txt.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#   python -m pytest -q
+
+pytest>=8.0
+pytest-asyncio>=0.23

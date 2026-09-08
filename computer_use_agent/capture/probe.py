@@ -30,6 +30,7 @@ import re
 from typing import Optional
 from urllib.parse import urlsplit
 
+from ..browser_actions import evaluate_bounded
 from .ffmpeg_util import probe_stream
 from .types import CaptureSource
 
@@ -260,7 +261,9 @@ class StreamProbe:
             if page_url:
                 headers["Referer"] = page_url
                 headers["Origin"] = f"{urlsplit(page_url).scheme}://{urlsplit(page_url).netloc}"
-            user_agent = await self._page.evaluate("() => navigator.userAgent")
+            user_agent = await evaluate_bounded(
+                self._page, "() => navigator.userAgent", what="read user agent",
+            )
             if user_agent:
                 headers["User-Agent"] = user_agent
         except Exception as exc:

@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
+from ..browser_actions import evaluate_bounded
 from ..config import config
 
 logger = logging.getLogger("cctv_audit.navigator")
@@ -204,7 +205,10 @@ async def detect_challenge(page) -> Optional[str]:
     """
     async def visible(specs):
         try:
-            return await page.evaluate(_VISIBLE_WIDGET_JS, [list(w) for w in specs])
+            return await evaluate_bounded(
+                page, _VISIBLE_WIDGET_JS, [list(w) for w in specs],
+                what="scan for challenge widgets",
+            )
         except Exception as exc:
             logger.debug("Could not scan for challenge widgets: %s", exc)
             return None
@@ -219,7 +223,10 @@ async def detect_challenge(page) -> Optional[str]:
     try:
         # Only the visible text: hidden markup routinely mentions "captcha"
         # in analytics payloads and would produce constant false positives.
-        text = (await page.evaluate("() => document.body ? document.body.innerText : ''") or "").lower()
+        text = (await evaluate_bounded(
+            page, "() => document.body ? document.body.innerText : ''",
+            what="read page text",
+        ) or "").lower()
     except Exception:
         return None
     hint = next((h for h in _CHALLENGE_HINTS if h.lower() in text), None)
@@ -296,8 +303,11 @@ async def diagnose_block(page) -> Optional[dict]:
             # the page from a distance ("there is a 返回上一页 button"). The
             # visible text is what lets it quote the actual error, which is
             # what a person reading the log at 2am needs.
-            seen = (await page.evaluate(
-                "() => document.body ? document.body.innerText.slice(0, 1500) : ''") or "")
+            seen = (await evaluate_bounded(
+                page,
+                "() => document.body ? document.body.innerText.slice(0, 1500) : ''",
+                what="read page text",
+            ) or "")
         except Exception:
             seen = ""
         response = await generate_content_with_retry(

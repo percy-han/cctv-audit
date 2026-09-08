@@ -35,6 +35,45 @@ logger = logging.getLogger("cctv_audit.actions")
 # real viewport size.
 COORD_SCALE = 1000
 
+# How long any page script gets before we stop waiting for it. Generous: these
+# are one-line DOM reads, and the point is to bound a hang, not to police
+# latency.
+EVALUATE_BUDGET_SECONDS = 15.0
+
+
+class PageScriptTimeout(RuntimeError):
+    """A page script did not return inside its budget."""
+
+
+async def evaluate_bounded(page, script, arg=None, *, budget=None, what="page script"):
+    """`page.evaluate` with a deadline. Use this instead of the raw call.
+
+    Playwright bounds `goto`, `click` and `wait_for_selector`; it does **not**
+    bound `evaluate`. If the script returns a promise, Playwright waits on that
+    promise for as long as the page keeps it pending -- forever, if that is how
+    long the page takes.
+
+    Which is not hypothetical. On a YouTube page opened headless the `<video>`
+    element exists but carries no source (`readyState` 0, `networkState` 0),
+    and `video.play()` on a sourceless element returns a promise that is never
+    settled either way. A preflight that awaited it sat silent for 900 seconds
+    until Agent Runtime cancelled the request: no log line, no exception, and
+    the job left in `probing` with an empty `error` field. Job `fcfd3c`,
+    2026-09-08.
+
+    A bounded wait turns that into an ordinary failure, which every caller here
+    already knows how to report.
+    """
+    budget = EVALUATE_BUDGET_SECONDS if budget is None else budget
+    call = page.evaluate(script) if arg is None else page.evaluate(script, arg)
+    try:
+        return await asyncio.wait_for(call, timeout=budget)
+    except asyncio.TimeoutError as exc:
+        raise PageScriptTimeout(
+            f"页面脚本 {budget:.0f} 秒没有返回（{what}）。页面可能卡在加载、"
+            f"广告或登录墙上。"
+        ) from exc
+
 
 def normalize_x(x: int, screen_width: int) -> int:
     return int(int(x) / COORD_SCALE * screen_width)
@@ -150,7 +189,7 @@ async def execute_action(
         }.get(direction)
         if not expr:
             return f"error: unknown scroll direction '{direction}'"
-        await page.evaluate(expr)
+        await evaluate_bounded(page, expr, what=f"scroll {direction}")
         return "success"
 
     if name in ("wait", "sleep"):

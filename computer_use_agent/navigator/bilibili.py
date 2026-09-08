@@ -26,6 +26,7 @@ import asyncio
 import logging
 from typing import Optional
 
+from ..browser_actions import evaluate_bounded
 from .base import (
     HumanGate,
     NavigationError,
@@ -119,7 +120,11 @@ class BilibiliNavigator:
 
         try:
             title = (await page.title()) or ""
-            body = await page.evaluate("() => document.body ? document.body.innerText.slice(0, 2000) : ''")
+            body = await evaluate_bounded(
+                page,
+                "() => document.body ? document.body.innerText.slice(0, 2000) : ''",
+                what="read page text",
+            )
         except Exception:
             return
         haystack = f"{title}\n{body}"
@@ -135,13 +140,27 @@ class BilibiliNavigator:
         """
         # Muting is what makes autoplay permissible under Chromium's policy.
         # Audio is irrelevant to visual SOP checks anyway.
-        await page.evaluate(
-            f"""async () => {{
+        #
+        # `play()` is fired and deliberately *not* awaited. On a <video> with no
+        # source attached -- which is what a YouTube page looks like when the
+        # player script has not initialised -- the promise it returns is never
+        # settled, and an `await` inside `page.evaluate` waits on it for as long
+        # as the platform allows the request to live. Whether playback actually
+        # started is not the promise's business anyway: `_is_advancing` watches
+        # the playhead, which is the only answer that matters.
+        await evaluate_bounded(
+            page,
+            f"""() => {{
                 const v = ({_VIDEO_SELECTOR})();
-                if (!v) return;
+                if (!v) return false;
                 v.muted = true;
-                try {{ await v.play(); }} catch (e) {{ /* fall through to a click */ }}
-            }}"""
+                try {{
+                    const p = v.play();
+                    if (p && p.catch) p.catch(() => {{}});
+                }} catch (e) {{ /* fall through to a click */ }}
+                return true;
+            }}""",
+            what="start playback",
         )
         if await self._is_advancing(page):
             return
@@ -158,12 +177,49 @@ class BilibiliNavigator:
             if await self._is_advancing(page):
                 return
 
-        raise NavigationError(
-            "播放始终没有推进。播放器可能停在广告、登录墙或地区限制上。"
-        )
+        raise NavigationError(await self._why_not_playing(page))
+
+    async def _why_not_playing(self, page) -> str:
+        """Turns "it did not play" into something a person can act on.
+
+        The three cases below need three different responses -- add an adapter,
+        supply a login, or wait out an ad -- and "播放始终没有推进" sends the
+        reader looking at all three.
+        """
+        generic = "播放始终没有推进。播放器可能停在广告、登录墙或地区限制上。"
+        try:
+            state = await evaluate_bounded(
+                page,
+                f"""() => {{
+                    const v = ({_VIDEO_SELECTOR})();
+                    if (!v) return null;
+                    return {{src: v.currentSrc || v.src || '',
+                             ready_state: v.readyState,
+                             network_state: v.networkState}};
+                }}""",
+                what="diagnose playback",
+            )
+        except Exception as exc:
+            logger.debug("Could not diagnose playback: %s", exc)
+            return generic
+
+        if state is None:
+            return "页面上找不到视频播放器。这个站点可能需要一个专门的适配器。"
+        if not state.get("src"):
+            # NETWORK_EMPTY / HAVE_NOTHING: the element is a shell the player
+            # script never filled in.
+            return (
+                "页面上的 <video> 没有加载任何视频源"
+                f"（readyState={state.get('ready_state')}，"
+                f"networkState={state.get('network_state')}）。"
+                "通常是播放器脚本没能初始化，或者这个站点要求先登录。"
+                "这个站点需要一个专门的适配器。"
+            )
+        return generic
 
     async def seek_to(self, page, seconds: float) -> None:
-        ok = await page.evaluate(
+        ok = await evaluate_bounded(
+            page,
             f"""(t) => {{
                 const v = ({_VIDEO_SELECTOR})();
                 if (!v) return false;
@@ -171,6 +227,7 @@ class BilibiliNavigator:
                 return true;
             }}""",
             float(seconds),
+            what="seek",
         )
         if not ok:
             raise NavigationError("无法跳转：页面上找不到视频播放器。")
@@ -179,8 +236,10 @@ class BilibiliNavigator:
 
     async def read_player_time(self, page) -> Optional[float]:
         try:
-            value = await page.evaluate(
-                f"() => {{ const v = ({_VIDEO_SELECTOR})(); return v ? v.currentTime : null; }}"
+            value = await evaluate_bounded(
+                page,
+                f"() => {{ const v = ({_VIDEO_SELECTOR})(); return v ? v.currentTime : null; }}",
+                what="read playhead",
             )
             return float(value) if value is not None else None
         except Exception as exc:
@@ -196,7 +255,8 @@ class BilibiliNavigator:
         until the wall-clock budget runs out.
         """
         try:
-            return await page.evaluate(
+            return await evaluate_bounded(
+                page,
                 f"""() => {{
                     const v = ({_VIDEO_SELECTOR})();
                     if (!v) return null;
@@ -206,7 +266,8 @@ class BilibiliNavigator:
                         ended: !!v.ended,
                         paused: !!v.paused,
                     }};
-                }}"""
+                }}""",
+                what="read playback state",
             )
         except Exception as exc:
             logger.debug("Could not read playback state: %s", exc)
@@ -223,7 +284,8 @@ class BilibiliNavigator:
         are about.
         """
         try:
-            return await page.evaluate(
+            return await evaluate_bounded(
+                page,
                 f"""() => {{
                     const v = ({_VIDEO_SELECTOR})();
                     if (!v) return null;
@@ -233,7 +295,8 @@ class BilibiliNavigator:
                              // letterbox/pillarbox bars, the footage does not.
                              intrinsic_width: v.videoWidth, intrinsic_height: v.videoHeight,
                              view_width: window.innerWidth, view_height: window.innerHeight}};
-                }}"""
+                }}""",
+                what="measure the player",
             )
         except Exception as exc:
             logger.debug("Could not measure the player: %s", exc)
@@ -279,12 +342,22 @@ class BilibiliNavigator:
                 if attempt == "keyboard":
                     await page.keyboard.press("w")  # bilibili: toggle web fullscreen
                 else:
-                    await page.evaluate(
-                        f"""async () => {{
+                    # Fired, not awaited, for the same reason as `play()`:
+                    # `requestFullscreen` returns a promise the page is free to
+                    # leave pending forever. `_fills_viewport` below is the
+                    # objective check, so the promise tells us nothing we do
+                    # not measure ourselves a second later.
+                    await evaluate_bounded(
+                        page,
+                        f"""() => {{
                             const v = ({_VIDEO_SELECTOR})();
                             const host = v && (v.closest('#bilibili-player') || v.parentElement);
-                            if (host && host.requestFullscreen) await host.requestFullscreen();
-                        }}"""
+                            if (host && host.requestFullscreen) {{
+                                const p = host.requestFullscreen();
+                                if (p && p.catch) p.catch(() => {{}});
+                            }}
+                        }}""",
+                        what="request fullscreen",
                     )
                 await asyncio.sleep(1.0)
                 if await self._fills_viewport(page):
@@ -341,16 +414,19 @@ class BilibiliNavigator:
 
     async def read_duration(self, page) -> Optional[float]:
         try:
-            value = await page.evaluate(
+            value = await evaluate_bounded(
+                page,
                 f"() => {{ const v = ({_VIDEO_SELECTOR})();"
-                f" return v && isFinite(v.duration) ? v.duration : null; }}"
+                f" return v && isFinite(v.duration) ? v.duration : null; }}",
+                what="read duration",
             )
             return float(value) if value is not None else None
         except Exception:
             return None
 
     async def set_playback_rate(self, page, rate: float) -> None:
-        applied = await page.evaluate(
+        applied = await evaluate_bounded(
+            page,
             f"""(r) => {{
                 const v = ({_VIDEO_SELECTOR})();
                 if (!v) return null;
@@ -358,6 +434,7 @@ class BilibiliNavigator:
                 return v.playbackRate;
             }}""",
             float(rate),
+            what="set playback rate",
         )
         if applied is None:
             raise NavigationError("无法设置倍速：页面上找不到视频播放器。")
@@ -422,7 +499,8 @@ class BilibiliNavigator:
             except Exception:
                 continue
         try:
-            hidden = await page.evaluate(
+            hidden = await evaluate_bounded(
+                page,
                 """(selectors) => {
                     let n = 0;
                     for (const sel of selectors) {
@@ -433,6 +511,7 @@ class BilibiliNavigator:
                     return n;
                 }""",
                 list(self._OVERLAY_HIDE),
+                what="hide overlays",
             )
             if hidden:
                 closed += hidden
@@ -449,14 +528,16 @@ class BilibiliNavigator:
         hands-and-counter region the SOP rules care about.
         """
         try:
-            await page.evaluate(
+            await evaluate_bounded(
+                page,
                 """() => {
                     document.querySelectorAll(
                         '.bpx-player-row-dm-wrap, .bili-danmaku-x, .bpx-player-dm-wrap, #danmukuBox'
                     ).forEach(el => { el.style.display = 'none'; });
                     const sw = document.querySelector('.bpx-player-dm-switch input');
                     if (sw && sw.checked) sw.click();
-                }"""
+                }""",
+                what="disable danmaku",
             )
         except Exception as exc:
             logger.debug("Could not disable danmaku: %s", exc)

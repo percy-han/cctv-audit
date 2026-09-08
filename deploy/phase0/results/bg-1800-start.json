@@ -1,0 +1,53 @@
+{
+  "message": {
+    "contextId": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/16186183109624167435",
+    "role": "ROLE_AGENT",
+    "content": [
+      {
+        "text": "好，开始了，单号 a36b2b，预计 1800 秒。实例 93418912-pid1。回「状态」查进度。"
+      }
+    ],
+    "metadata": {
+      "sessionInfo": {
+        "turnId": "16186183109624167435_12839817847768891888",
+        "queryId": "12839817847768892625",
+        "session": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/16186183109624167435"
+      },
+      "assistToken": "M8gKCwibweXUBhDf2rVnEiQ2YTk4ZjhhNy0wMDAwLTIxMDItODU0NC01ODI0MjlhOTc4NDA",
+      "agentInfo": {
+        "displayName": "CCTV 稽核探针",
+        "agent": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/assistants/default_assistant/agents/16091433261218097511"
+      },
+      "answer": {
+        "state": "SUCCEEDED",
+        "diagnosticInfo": {
+          "plannerSteps": [
+            {
+              "queryStep": {
+                "parts": [
+                  {
+                    "text": "后台 1800 秒"
+                  }
+                ]
+              },
+              "createTime": "2026-09-03T11:57:15.739352549Z"
+            },
+            {
+              "planStep": {
+                "role": "MODEL",
+                "parts": [
+                  {
+                    "text": "好，开始了，单号 a36b2b，预计 1800 秒。实例 93418912-pid1。回「状态」查进度。"
+                  }
+                ],
+                "planStepId": "16508558745920637987"
+              },
+              "createTime": "2026-09-03T11:57:15.992372097Z"
+            }
+          ]
+        },
+        "name": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/16186183109624167435/assistAnswers/12839817847768893773"
+      }
+    }
+  }
+}

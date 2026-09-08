@@ -1,0 +1,49 @@
+<!doctype html>
+<!--
+  The Plan A page. hls.js fetches index.m3u8, so the probe attached before
+  navigation sees a manifest go by and picks stream capture.
+
+  hls.js is served from this same origin on purpose. The first version of this
+  demo pointed at someone else's player page; it worked once and timed out the
+  next time, which is not a thing to discover in front of a customer.
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>CAM01 收银台 · HLS</title>
+<style>
+  html,body{margin:0;background:#111;color:#ddd;font:14px/1.6 system-ui,sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:16px}
+  video{width:100%;background:#000;display:block}
+  h1{font-size:16px;font-weight:600;margin:0 0 10px}
+  .note{color:#888;margin-top:10px}
+  a{color:#7ef0a0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>CAM01 收银台 · 分片流（HLS）</h1>
+  <video id="v" controls autoplay muted playsinline></video>
+  <p class="note">
+    这一页会被识别为 <b>Plan A（抓流）</b>。
+    另一条路：<a href="/mp4.html">整段文件（Plan B 录屏）</a>
+  </p>
+</div>
+<script src="/hls.min.js"></script>
+<script>
+  var video = document.getElementById('v');
+  var src = '/hls/index.m3u8';
+  if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = src;
+  } else if (window.Hls && window.Hls.isSupported()) {
+    var hls = new Hls();
+    hls.loadSource(src);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, function () { video.play(); });
+  }
+  // Autoplay is muted so Chromium allows it without a gesture. The audit only
+  // ever looks at pictures, so nothing is lost.
+  video.addEventListener('canplay', function () { video.play(); });
+</script>
+</body>
+</html>

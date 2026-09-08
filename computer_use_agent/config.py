@@ -25,6 +25,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 import certifi
 from dotenv import load_dotenv
@@ -72,6 +73,27 @@ def _project_path(raw: str) -> Path:
     return path if path.is_absolute() else (PROJECT_DIR / path)
 
 
+def _env_origins(key: str) -> tuple[str, ...]:
+    """A comma-separated list of origins, normalised to `scheme://host[:port]`.
+
+    Normalising here rather than at every comparison site is what makes the
+    match reliable: an operator writing a trailing slash, a path, or a capital
+    letter in the host is writing the same origin, and an allow-list that
+    misses because of a slash fails open in the confusing direction -- the
+    request goes out unauthenticated and the page 403s with no hint why.
+    """
+    out: list[str] = []
+    for item in _env_str(key).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        parts = urlsplit(item if "//" in item else f"https://{item}")
+        if not parts.hostname:
+            continue
+        out.append(f"{(parts.scheme or 'https').lower()}://{parts.netloc.lower()}")
+    return tuple(dict.fromkeys(out))
+
+
 def _env_opt_int(key: str) -> Optional[int]:
     raw = _env_str(key)
     try:
@@ -89,7 +111,18 @@ class Config:
     # endpoints. "global" means Google routes by capacity with no geographic
     # guarantee -- see the Region section of the plan before promising data
     # residency to a customer.
-    gcp_project: str = field(default_factory=lambda: _env_str("GOOGLE_CLOUD_PROJECT") or _env_str("GCP_PROJECT"))
+    # GCP_PROJECT wins over GOOGLE_CLOUD_PROJECT, which looks backwards and is
+    # not. Agent Runtime sets GOOGLE_CLOUD_PROJECT itself -- it refuses a
+    # deployment that also declares it -- and what it sets is the project
+    # *number*. A named Firestore database is not addressable by number:
+    #
+    #   projects/study-project-496907/databases/cctv-audit   200
+    #   projects/596821501265/databases/cctv-audit           404 "does not exist"
+    #
+    # which surfaced as a flat 404 from inside the container while the database
+    # sat there in the console. So the deployment sets GCP_PROJECT to the id and
+    # that is the one to believe. Locally nobody sets it and nothing changes.
+    gcp_project: str = field(default_factory=lambda: _env_str("GCP_PROJECT") or _env_str("GOOGLE_CLOUD_PROJECT"))
     gcp_location: str = "global"
     nav_model: str = field(default_factory=lambda: _env_str("ADK_MODEL", "gemini-3.5-flash"))
     analysis_model: str = field(default_factory=lambda: _env_str("ANALYSIS_MODEL", "gemini-3.5-flash"))
@@ -100,6 +133,23 @@ class Config:
     screen_height: int = field(default_factory=lambda: _env_int("SCREEN_HEIGHT", 1080))
     allow_private_network: bool = field(default_factory=lambda: _env_bool("ALLOW_PRIVATE_NETWORK_ACCESS", True))
     playback_rate: float = field(default_factory=lambda: _env_float("PLAYBACK_RATE", 1.0))
+
+    # Origins whose pages and media are behind Google IAM -- Cloud Run with
+    # `--no-allow-unauthenticated`, or IAP. Requests to these get an
+    # `Authorization: Bearer <Google ID token>` header; requests anywhere else
+    # get nothing.
+    #
+    # An allow-list, and not a "send it if the server asks" retry, because the
+    # thing being handed out is this deployment's own identity. A site that
+    # 401s is not thereby entitled to it: bilibili would happily take the
+    # header and we would have posted a service account token to a third party
+    # for nothing. Naming the origins means that cannot happen by accident.
+    #
+    # Comma-separated, scheme and host, no path:
+    #   OIDC_ORIGINS=https://cctv-demo-video-xxxx-uc.a.run.app
+    oidc_origins: tuple[str, ...] = field(
+        default_factory=lambda: _env_origins("OIDC_ORIGINS")
+    )
 
     # ---- Human-in-the-loop gate ----------------------------------------
     # Where this runs decides whether waiting for a person is a strategy or a
@@ -160,6 +210,25 @@ class Config:
         _env_str("SOP_RULES_PATH", str(PACKAGE_DIR / "analyzer" / "sop_rules.yaml"))
     ))
 
+    # ---- Cloud state (Agent Runtime) --------------------------------------
+    # Empty means "stay local". A workstation running `adk web` keeps job state
+    # in memory and evidence under DATA_DIR, which is the right answer there:
+    # one process, one disk, nothing to lose. On Agent Runtime both assumptions
+    # break -- instances scale and their filesystem is temporary -- so the
+    # deployment sets these and the same code writes to Firestore and GCS.
+    firestore_database: str = field(default_factory=lambda: _env_str("FIRESTORE_DATABASE"))
+    jobs_collection: str = field(default_factory=lambda: _env_str("JOBS_COLLECTION", "cctv_audit_users"))
+    # Evidence frames and reports. Without a bucket they stay on local disk.
+    artifacts_bucket: str = field(default_factory=lambda: _env_str("ARTIFACTS_BUCKET"))
+    artifacts_prefix: str = field(default_factory=lambda: _env_str("ARTIFACTS_PREFIX", "audits"))
+    # Versioned SOP YAML: gs://<bucket>/<prefix>/<sop_id>.yaml
+    sop_bucket: str = field(default_factory=lambda: _env_str("SOP_BUCKET"))
+    sop_prefix: str = field(default_factory=lambda: _env_str("SOP_PREFIX", "sop"))
+    # Which version to use when the caller names none. Deliberately has no
+    # built-in default: an audit judged against an unnamed standard cannot be
+    # defended later, so a missing id is an error, not a shrug.
+    default_sop_id: str = field(default_factory=lambda: _env_str("DEFAULT_SOP_ID"))
+
     # ---- Monitor -------------------------------------------------------
     monitor_host: str = field(default_factory=lambda: _env_str("MONITOR_HOST", "127.0.0.1"))
     monitor_port: int = field(default_factory=lambda: _env_int("MONITOR_PORT", 8080))
@@ -170,17 +239,46 @@ class Config:
     monitor_replay_history: bool = field(
         default_factory=lambda: _env_bool("MONITOR_REPLAY_HISTORY", False)
     )
+    # Where the dashboard actually is. Empty means "same machine", which is
+    # right for `adk web`: the audit and the dashboard are two processes on one
+    # box. On Agent Runtime they are two services -- the audit has no dashboard
+    # inside it at all -- so the deployment points this at the Cloud Run URL.
+    # Requests carry MONITOR_TOKEN, which is what makes a live CCTV feed and a
+    # remote write endpoint safe to expose at all.
+    monitor_url: str = field(default_factory=lambda: _env_str("MONITOR_URL").rstrip("/"))
     # The dashboard gets its own screencast, so these cost the evidence feed
-    # nothing. 960x540 q60 is ~58 KB a frame, which makes 15 fps cheaper than
-    # the old 4 fps of full-size frames (~280 KB) and far smoother.
-    preview_fps: int = field(default_factory=lambda: _env_int("PREVIEW_FPS", 15))
-    preview_width: int = field(default_factory=lambda: _env_int("PREVIEW_WIDTH", 960))
-    preview_height: int = field(default_factory=lambda: _env_int("PREVIEW_HEIGHT", 540))
+    # nothing -- but they do cost egress, and every viewer is a separate stream.
+    #
+    # These were briefly 640x360 q50 at 8 fps, chosen against a *guessed* 25 KB
+    # a frame. Measured, a frame is ~2.5 KB, so the guess was ten times too
+    # pessimistic and bought a saving nobody needed at a cost everybody saw:
+    # on a 1080p wall the picture is a postage stamp. 1280x720 q60 at 12 fps is
+    # the default now. Even at a pessimistic 40 KB a frame on real shop footage
+    # that is under 4 Mbps, and it only flows while somebody is watching.
+    # This is still the "watch progress" feed, not the "judge compliance" one --
+    # evidence frames are captured separately at full quality.
+    preview_fps: int = field(default_factory=lambda: _env_int("PREVIEW_FPS", 12))
+    preview_width: int = field(default_factory=lambda: _env_int("PREVIEW_WIDTH", 1280))
+    preview_height: int = field(default_factory=lambda: _env_int("PREVIEW_HEIGHT", 720))
     preview_quality: int = field(default_factory=lambda: _env_int("PREVIEW_QUALITY", 60))
 
     # ---- Computer Use fallback ------------------------------------------
     fallback_max_turns: int = field(default_factory=lambda: _env_int("FALLBACK_MAX_TURNS", 25))
     enable_injection_detection: bool = field(default_factory=lambda: _env_bool("ENABLE_INJECTION_DETECTION", True))
+
+    @property
+    def use_firestore(self) -> bool:
+        """Firestore is on as soon as a database is named. No separate switch.
+
+        Two flags that have to agree ("enabled" plus "which one") is a way to
+        end up with jobs quietly landing in memory on a scaled deployment,
+        which fails as "the customer's job number stopped existing".
+        """
+        return bool(self.firestore_database)
+
+    @property
+    def use_gcs(self) -> bool:
+        return bool(self.artifacts_bucket)
 
     @property
     def evidence_dir(self) -> Path:

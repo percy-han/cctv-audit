@@ -34,6 +34,13 @@ Two properties have to survive the change:
 The regex parser is kept as the offline fallback: unit tests, and any run on a
 machine that cannot reach Vertex, still need to get a URL out of a sentence.
 When it is used we say so, because it understands far less.
+
+**On the Gemini Enterprise path, none of this is the main road.** GE does the
+first pass -- it is told to ask for a missing time span or a missing shop and
+not to call the tool until it has them -- so what arrives is already fields.
+`from_fields` is that entrance: same validation, same refusals, no model call.
+`interpret_request` stays for the local `adk web` entrance and as the last
+line of defence when GE hands over something incomplete.
 """
 
 from __future__ import annotations
@@ -181,6 +188,76 @@ async def interpret_request(text: str) -> Optional[Intent]:
         request = parse_request(text)
         return None if request is None else Intent(request=request, source="regex")
     return reading
+
+
+def from_fields(
+    target: str,
+    start: Optional[object] = None,
+    end: Optional[object] = None,
+    duration: Optional[object] = None,
+) -> Intent:
+    """Builds a request from fields somebody else already parsed.
+
+    The GE entrance. Numbers or clock strings both work -- "900", 900 and
+    "15:00" are the same instant -- because what comes down the wire depends on
+    how the model upstream chose to phrase it, and rejecting a valid request
+    over its formatting would be a bad reason to stop.
+
+    Validates rather than trusts. GE is a language model too, and "end before
+    start" arrives from it exactly as often as from a person typing.
+
+    Raises `ValueError` when no video is named and `UnreadableTimeSpan` when
+    the span makes no sense. Never guesses.
+    """
+    url = (target or "").strip().rstrip("）)、,。;；")
+    if not url:
+        raise ValueError("没有给视频地址")
+    if not url.lower().startswith(("http://", "https://")):
+        # A shop name is not a URL. Turning one into a search would audit
+        # whatever came back first, which is the wrong shop by default.
+        raise ValueError(f"{url!r} 不是一个视频地址")
+
+    start_seconds = _coerce_seconds(start, "起点") or 0.0
+    end_seconds = _coerce_seconds(end, "终点")
+    span = _coerce_seconds(duration, "时长")
+
+    if start_seconds < 0:
+        raise UnreadableTimeSpan(f"起点 {start!r} 是负数")
+    if end_seconds is not None:
+        if end_seconds <= start_seconds:
+            raise UnreadableTimeSpan(
+                f"{Clip.format_offset(start_seconds)} 到 "
+                f"{Clip.format_offset(end_seconds)}，终点不在起点之后"
+            )
+        # An explicit end wins over a duration: it is the more specific of the
+        # two, and a caller that sends both contradictory is telling us the
+        # duration was inferred.
+        span = end_seconds - start_seconds
+    elif span is not None and span <= 0:
+        raise UnreadableTimeSpan(f"时长 {duration!r} 不是正数")
+
+    reading = (
+        f"从 {Clip.format_offset(start_seconds)} 看到 "
+        f"{Clip.format_offset(start_seconds + span)}"
+        if span else f"从 {Clip.format_offset(start_seconds)} 看到录像结束"
+    )
+    return Intent(
+        request=AuditRequest(target=url, start_seconds=start_seconds, duration_seconds=span),
+        reading=reading,
+        source="fields",
+    )
+
+
+def _coerce_seconds(value: Optional[object], label: str) -> Optional[float]:
+    """Accepts a number, a clock string, or "5分钟". None and "" mean unset."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return _to_seconds(str(value))
+    except (ValueError, IndexError) as exc:
+        raise UnreadableTimeSpan(f"{label} {value!r} 读不出来：{exc}") from exc
 
 
 async def _ask_model(text: str) -> Optional[Intent]:

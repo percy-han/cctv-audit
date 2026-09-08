@@ -29,6 +29,11 @@ class CaptureSource:
     url: Optional[str] = None  # media URL, when mode == "stream"
     headers: Optional[dict] = None  # cookies / referer needed to fetch it
     reason: str = ""  # why this mode was chosen, surfaced in logs and the dashboard
+    # How long the media actually is, when ffprobe could tell us. Preflight
+    # answers "is the time span you asked for even in this recording", and it
+    # needs a number for that -- the same figure was previously formatted into
+    # `reason` and thrown away. None means live, or unknown.
+    duration_seconds: Optional[float] = None
 
 
 @dataclass(frozen=True)

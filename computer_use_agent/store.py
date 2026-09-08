@@ -22,21 +22,31 @@ a downstream consumer rather than a second author.
 Each violation also gets a still frame pulled from the exact moment the model
 cited, so a human reviewer can confirm or reject it without replaying the
 footage. A finding with no reviewable evidence is not worth recording.
+
+Where "on disk" points depends on where this runs. On a workstation the JSONL
+and the frames are files and that is the end of it. On Agent Runtime the
+filesystem is scratch space that goes away with the instance, so the frames go
+through `artifact_sink()` to a bucket and each record is handed to
+`persist_record` on its way past. The local JSONL is still written either way:
+it costs nothing, and when something goes wrong on a container it is the only
+thing left to read.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Awaitable, Callable, List, Optional
 
 from .analyzer.schema import Severity, Status, WindowResult
 from .analyzer.sop import SopRuleSet, load_rules
 from .analyzer.video_analyzer import AnalysisOutcome
+from .artifacts import LocalArtifactSink, artifact_sink
 from .capture.ffmpeg_util import extract_frame
 from .capture.types import Clip
 from .config import config
@@ -76,8 +86,30 @@ class AuditStore:
     recording_started_at: Optional[datetime] = None
     on_record: Optional[Callable[[dict], None]] = None
     rules: Optional[SopRuleSet] = None
+    # Which audit these records belong to. Empty for a local one-off run; set
+    # on Agent Runtime, where one bucket and one Firestore database hold every
+    # customer's audits and `w00007_hygiene_0003.jpg` is not a unique name.
+    job_id: str = ""
+    # Called with each finished record, for storage that outlives the instance.
+    # Separate from `on_record`, which is the dashboard: that one is a
+    # fire-and-forget UI ping, this one is the record actually being kept.
+    persist_record: Optional[Callable[[dict], Awaitable[None]]] = None
+    # Where the records really end up, in words a person can act on. Set by
+    # whoever wired `persist_record`, because only they know: the store knows
+    # that a coroutine is called per record, not that it writes to Firestore.
+    #
+    # Empty means the JSONL on this disk is the record, which is true locally
+    # and false on Agent Runtime -- where `records_path` is a temp file that
+    # dies with the instance. A report that prints it is telling the customer
+    # to go look at something that is already gone.
+    records_location: str = ""
 
     def __post_init__(self) -> None:
+        # One directory per job when there is one, so the path relative to
+        # `DATA_DIR` -- which is also the object key in the bucket -- carries
+        # the job id without anything having to splice it in later.
+        if self.job_id:
+            self.evidence_dir = self.evidence_dir / self.job_id
         self.records_path.parent.mkdir(parents=True, exist_ok=True)
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
         self._rules = self.rules or load_rules()
@@ -142,6 +174,12 @@ class AuditStore:
                 "action_narrative": result.action_narrative,
                 "people_count": result.people_count,
                 "visibility_ok": result.visibility_ok,
+                # Which written standard produced these verdicts. Denormalised
+                # onto every record on purpose: "was this judged under v2 or
+                # v3" is the first question asked when a finding is disputed,
+                # and by then the standard has usually moved on.
+                "sop_id": self._rules.sop_id,
+                "sop_version": self._rules.version,
                 "sop_status": self._window_status(result),
                 "severity": result.worst_severity().value,
                 "findings": findings,
@@ -167,6 +205,17 @@ class AuditStore:
             )
             self.stats.input_tokens += outcome.input_tokens
             self.stats.output_tokens += outcome.output_tokens
+
+        # Outside the lock: a Firestore round trip per window would otherwise
+        # serialise the analysis workers behind each other.
+        if self.persist_record is not None:
+            try:
+                await self.persist_record(record)
+            except Exception as exc:
+                # The record is in the local JSONL and the frame is in the
+                # bucket. Losing the remote copy of one window is bad; taking
+                # down the audit over it is worse.
+                logger.warning("Could not persist record %d: %s", record_id, str(exc)[:200])
 
         if self.on_record is not None:
             try:
@@ -203,19 +252,47 @@ class AuditStore:
         return entry
 
     async def _save_evidence(self, clip: Clip, finding) -> Optional[str]:
-        out_path = (
-            self.evidence_dir
-            / f"w{clip.index:05d}_{finding.rule_id}_{int(finding.offset_seconds):04d}.jpg"
-        )
+        """Cuts the still and puts it where it can be looked at later.
+
+        ffmpeg can only write to a real file, so the frame is always cut
+        locally first and then handed to the sink. Locally the sink is that
+        same directory and the write is the whole story; on a container the
+        sink is a bucket and the local copy is deleted straight after, because
+        a multi-hour audit that keeps every frame fills the instance's disk.
+
+        Returns the locator to record, or None -- `_render_finding` puts that
+        None in `evidence_frame`, and the report renders it as "no reviewable
+        still" rather than a broken link.
+        """
+        name = f"w{clip.index:05d}_{finding.rule_id}_{int(finding.offset_seconds):04d}.jpg"
+        out_path = self.evidence_dir / name
         # The offset is inside the clip file, which is where ffmpeg has to seek.
         # For a sped-up recording that is not the same as the video offset.
         ok = await extract_frame(clip.path, finding.offset_seconds, out_path)
         if not ok:
             return None
+
         try:
-            return str(out_path.relative_to(config.data_dir))
+            key = str(out_path.relative_to(config.data_dir))
         except ValueError:
+            # `evidence_dir` was pointed somewhere outside `DATA_DIR`. Fall back
+            # to a key the sink will accept rather than refusing to store it.
+            key = f"{self.job_id}/evidence/{name}" if self.job_id else f"evidence/{name}"
+
+        sink = artifact_sink()
+        locator = await sink.put_file(key, out_path, "image/jpeg")
+        if locator is None:
+            # The upload failed and said so. The frame is still on this disk,
+            # which is worth naming for however long the instance lives --
+            # better a locator that may expire than no evidence at all.
+            logger.warning("Evidence frame %s was not stored remotely.", name)
             return str(out_path)
+        if not isinstance(sink, LocalArtifactSink):
+            # It is in the bucket now. A multi-hour audit that also keeps every
+            # frame locally fills the instance's disk and takes the run with it.
+            with contextlib.suppress(OSError):
+                out_path.unlink(missing_ok=True)
+        return locator
 
     @staticmethod
     def _window_status(result: WindowResult) -> str:
@@ -232,11 +309,34 @@ class AuditStore:
         return (self.recording_started_at + timedelta(seconds=video_offset)).isoformat()
 
     def summary(self) -> dict:
+        """The run's numbers, plus where to go and look at the detail.
+
+        Both locations are what a reader should actually open, which on a
+        container is not the same as what this object wrote to. Evidence frames
+        are uploaded and then deleted from local disk; records are handed to
+        `persist_record`. Printing `/tmp/checkpoints/...` in that deployment is
+        not a small inaccuracy -- it is a report telling someone to inspect a
+        file that no longer exists on a machine they cannot reach.
+        """
         return {
             **self.stats.as_dict(),
-            "records_path": str(self.records_path),
-            "evidence_dir": str(self.evidence_dir),
+            "records_path": self.records_location or str(self.records_path),
+            "evidence_dir": artifact_sink().location(self._evidence_key())
+                            or str(self.evidence_dir),
         }
+
+    def _evidence_key(self) -> str:
+        """The sink key the frames in this run were stored under.
+
+        Derived the same way `_save_evidence` derives each frame's key, and
+        with the same fallback, so the directory the report names is the
+        directory the frames are actually in. Computing it a second way here
+        is how the two drift apart the next time either changes.
+        """
+        try:
+            return str(self.evidence_dir.relative_to(config.data_dir))
+        except ValueError:
+            return f"{self.job_id}/evidence" if self.job_id else "evidence"
 
     def violations(self, limit: Optional[int] = None) -> List[dict]:
         """The violations found by *this* run, in video-time order.

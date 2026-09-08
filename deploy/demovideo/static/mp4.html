@@ -1,0 +1,34 @@
+<!doctype html>
+<!--
+  The Plan B page. One progressive file, no manifest, so the probe finds
+  nothing to pull and falls back to screen-recording the player -- which is the
+  path a CCTV console with a proprietary player will take too.
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>CAM01 收银台 · 整段</title>
+<style>
+  html,body{margin:0;background:#111;color:#ddd;font:14px/1.6 system-ui,sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:16px}
+  video{width:100%;background:#000;display:block}
+  h1{font-size:16px;font-weight:600;margin:0 0 10px}
+  .note{color:#888;margin-top:10px}
+  a{color:#7ef0a0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>CAM01 收银台 · 整段文件</h1>
+  <video id="v" src="/store.mp4" controls autoplay muted playsinline></video>
+  <p class="note">
+    这一页会被识别为 <b>Plan B（录屏）</b>。
+    另一条路：<a href="/hls.html">分片流（Plan A 抓流）</a>
+  </p>
+</div>
+<script>
+  var video = document.getElementById('v');
+  video.addEventListener('canplay', function () { video.play(); });
+</script>
+</body>
+</html>

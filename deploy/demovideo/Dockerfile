@@ -11,15 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Static footage over HTTP. No application, no state, nothing to authenticate
+# against -- Cloud Run's own IAM is the only door, because the organisation
+# policy will not allow `allUsers` on anything in this project.
 
-"""SOP judgement: one video window in, one structured verdict out."""
+FROM nginx:1.27-alpine
 
-from .schema import Finding, Severity, Status, WindowResult, response_schema
-from .sop import SopRule, SopRuleSet, SopUnavailable, load_rules, load_rules_for
-from .video_analyzer import AnalysisOutcome, VideoAnalyzer
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY static/ /srv/video/
+COPY assets/ /srv/video/
 
-__all__ = [
-    "Finding", "Severity", "Status", "WindowResult", "response_schema",
-    "SopRule", "SopRuleSet", "SopUnavailable", "load_rules", "load_rules_for",
-    "AnalysisOutcome", "VideoAnalyzer",
-]
+# nginx:alpine runs as root and drops to `nginx` for workers. Cloud Run is
+# happy with that, and the container writes nothing outside /tmp.
+EXPOSE 8080

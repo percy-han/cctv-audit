@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from pathlib import Path
 
 import pytest
@@ -1256,6 +1258,111 @@ class TestDeadPageClassification:
             self._Page("正常的视频页面"), "https://x", self._Response(200))
 
 
+class TestClosingTheLoginNag:
+    """Closing the dialog is only half the job -- bilibili pauses the video.
+
+    Job 692b53: the nag appeared ~70s in, `keep_clear` closed it on the next
+    poll, and the player stayed paused. Chromium repaints nothing, so the
+    screencast delivered 0 fps and the dashboard showed one still for the rest
+    of the run while the audit itself carried on perfectly well.
+    """
+
+    class _Element:
+        def __init__(self, present):
+            self.present, self.clicked = present, 0
+
+        async def count(self):
+            return 1 if self.present else 0
+
+        async def is_visible(self, timeout=None):
+            return self.present
+
+        async def click(self, timeout=None, force=False):
+            self.clicked += 1
+            self.present = False
+
+    class _Locator:
+        def __init__(self, element):
+            self.first = element
+
+    class _Page:
+        def __init__(self, *, modal, hidden=0):
+            self.modal = TestClosingTheLoginNag._Element(modal)
+            self.hidden = hidden
+            self.evaluated = 0
+
+        def locator(self, selector):
+            # Only the first closer in the list matches, as on the real page.
+            present = selector == ".bili-mini-mask .bili-mini-close-icon"
+            return TestClosingTheLoginNag._Locator(
+                self.modal if present else TestClosingTheLoginNag._Element(False))
+
+        async def evaluate(self, script, *args):
+            self.evaluated += 1
+            # The overlay-hiding pass is the only one that takes an argument.
+            return self.hidden if args else None
+
+    def _nav(self):
+        from computer_use_agent.navigator.bilibili import BilibiliNavigator
+        return BilibiliNavigator()
+
+    @pytest.mark.asyncio
+    async def test_dismissing_a_modal_also_restarts_the_player(self, monkeypatch):
+        navigator = self._nav()
+        played = []
+
+        async def ensure_playing(page):
+            played.append(page)
+
+        monkeypatch.setattr(navigator, "ensure_playing", ensure_playing)
+        page = self._Page(modal=True)
+        await navigator.keep_clear(page)
+
+        assert page.modal.clicked == 1
+        assert len(played) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_clean_page_is_left_alone(self, monkeypatch):
+        # keep_clear runs every few seconds for the whole audit. Calling play()
+        # unconditionally would override a human working the gate, and would
+        # make "we restarted the player" meaningless in the log.
+        navigator = self._nav()
+        played = []
+
+        async def ensure_playing(page):
+            played.append(page)
+
+        monkeypatch.setattr(navigator, "ensure_playing", ensure_playing)
+        page = self._Page(modal=False)
+        await navigator.keep_clear(page)
+
+        assert played == []
+
+    @pytest.mark.asyncio
+    async def test_a_player_that_will_not_restart_does_not_break_the_poll(self, monkeypatch):
+        # The caller does its remaining housekeeping after this returns, and
+        # will come round again in a few seconds anyway.
+        from computer_use_agent.navigator.base import NavigationError
+
+        navigator = self._nav()
+
+        async def refuses(page):
+            raise NavigationError("播放始终没有推进")
+
+        monkeypatch.setattr(navigator, "ensure_playing", refuses)
+        await navigator.keep_clear(self._Page(modal=True))
+
+    @pytest.mark.asyncio
+    async def test_the_count_separates_never_saw_it_from_could_not_fix_it(self):
+        # This number is why the logging is INFO rather than DEBUG: DEBUG does
+        # not reach Cloud Logging, and without it "no modal appeared" and "we
+        # closed the modal and the player stayed paused" look identical.
+        navigator = self._nav()
+        assert await navigator._dismiss_overlays(self._Page(modal=False)) == 0
+        assert await navigator._dismiss_overlays(self._Page(modal=True)) == 1
+        assert await navigator._dismiss_overlays(self._Page(modal=True, hidden=2)) == 3
+
+
 class TestChallengeDetection:
     """False positives here suspend a multi-hour audit and page a human."""
 
@@ -1517,6 +1624,7 @@ class TestStallRecovery:
         # silently succeeded would hide a crash in it behind the loop's
         # catch-all.
         _hold_geometry = _P._hold_geometry
+        _note_picture_frozen = _P._note_picture_frozen
         del _P
 
         def __init__(self):
@@ -1526,6 +1634,7 @@ class TestStallRecovery:
             self._footage_ends_at = None
             self._player_rect = None
             self._geometry_warned = False
+            self._picture_frozen = False
             self.events = []
 
         def _emit(self, event, payload):
@@ -1543,7 +1652,7 @@ class TestStallRecovery:
             self.runner = None
 
         async def keep_clear(self, page):
-            pass
+            self.cleanings = getattr(self, "cleanings", 0) + 1
 
         async def ensure_playing(self, page):
             self.plays += 1
@@ -1558,7 +1667,7 @@ class TestStallRecovery:
                 self.current += 2.0
             return {"ended": False, "current_time": self.current, "duration": self.duration}
 
-    async def _run(self, navigator, monkeypatch):
+    async def _run(self, navigator, monkeypatch, *, page_is_source=True):
         import types as _types
 
         from computer_use_agent import pipeline as pipeline_module
@@ -1570,7 +1679,10 @@ class TestStallRecovery:
         ))
         runner = self._Runner()
         navigator.runner = runner
-        await asyncio.wait_for(runner._watch_page(object(), navigator), timeout=10)
+        await asyncio.wait_for(
+            runner._watch_page(object(), navigator, page_is_source=page_is_source),
+            timeout=10,
+        )
         return runner
 
     @pytest.mark.asyncio
@@ -1611,6 +1723,211 @@ class TestStallRecovery:
         assert "播放完毕" in runner._stop_reason
 
 
+class TestPlanAPageWatchdog:
+    """Under Plan A the page is the dashboard picture, not the footage.
+
+    Measured on bilibili (job 692b53): the login nag appeared ~70s in and
+    paused the player. Chromium only emits a screencast frame on repaint, so
+    the cast went to 0.0 fps while the pump kept forwarding the same 84.3 KB
+    still at 11.9 fps -- an operator watching a frozen screen with every number
+    on the page reporting success. ffmpeg was pulling the media directly the
+    whole time and the audit finished with 25 windows and 9 violations.
+
+    So the watchdog has to run on this plan too, and it has to do exactly two
+    things differently: never end the run from what the page says, and never
+    stop trying to get the picture back.
+    """
+
+    _Runner = TestStallRecovery._Runner
+    _Navigator = TestStallRecovery._Navigator
+    _run = TestStallRecovery._run
+
+    @pytest.mark.asyncio
+    async def test_a_paused_page_never_ends_a_plan_a_audit(self, monkeypatch):
+        # The exact shape of the bilibili run: stuck at 01:19 of 05:00, and
+        # nothing we do to the player brings it back.
+        navigator = self._Navigator(79.0, 300.0, recoverable=False, budget=60)
+        runner = await self._run(navigator, monkeypatch, page_is_source=False)
+
+        assert runner._stop_kind is None, "a dialog box must not stop the audit"
+        assert runner._stop_reason is None
+        assert runner._footage_ends_at is None
+        assert "playback_stalled" not in runner.kinds()
+
+    @pytest.mark.asyncio
+    async def test_it_keeps_trying_past_plan_bs_three_strikes(self, monkeypatch):
+        navigator = self._Navigator(79.0, 300.0, recoverable=False, budget=60)
+        await self._run(navigator, monkeypatch, page_is_source=False)
+
+        # Plan B stops at three because three failures mean the footage is
+        # over. Plan A has no such verdict to reach, and bilibili re-raises the
+        # nag every couple of minutes -- giving up would forfeit the rest of
+        # the run's picture.
+        assert navigator.plays > 3
+        # And the overlay sweep runs on every single poll, not just the ones
+        # that nudge -- that sweep is what closes the dialog in the first place.
+        assert navigator.cleanings >= 60
+
+    @pytest.mark.asyncio
+    async def test_the_frozen_picture_is_announced_exactly_once(self, monkeypatch):
+        navigator = self._Navigator(79.0, 300.0, recoverable=False, budget=60)
+        runner = await self._run(navigator, monkeypatch, page_is_source=False)
+
+        frozen = [p for e, p in runner.events if e == "picture_frozen"]
+        # Said once, not on every poll: the watchdog runs every few seconds and
+        # a banner repeating itself thirty times is a banner nobody reads.
+        assert len(frozen) == 1
+        assert "01:19" in frozen[0]["reason"]
+        assert "稽核不受影响" in frozen[0]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_the_notice_is_rearmed_when_the_picture_comes_back(self, monkeypatch):
+        navigator = self._Navigator(79.0, 300.0, recoverable=True, budget=60)
+        runner = await self._run(navigator, monkeypatch, page_is_source=False)
+
+        # Recovery happens at the tenth stalled poll, long before the thirtieth
+        # that would trigger the notice -- so nothing is said at all, and the
+        # latch is left ready for the next nag.
+        assert "picture_frozen" not in runner.kinds()
+        assert runner._picture_frozen is False
+        assert navigator.current > 79.0
+
+    @pytest.mark.asyncio
+    async def test_a_finished_page_is_a_still_frame_not_a_finished_audit(self, monkeypatch):
+        # Plan A's page can run out well before the audit does -- and nudging
+        # an ended <video> restarts it from zero, which on the dashboard reads
+        # as the audit jumping back to the beginning.
+        navigator = self._Navigator(299.5, 300.0, recoverable=False, budget=5)
+        runner = await self._run(navigator, monkeypatch, page_is_source=False)
+
+        assert runner._stop_kind is None
+        assert "video_ended" not in runner.kinds()
+        assert navigator.plays == 0
+        assert [p["reason"] for e, p in runner.events if e == "picture_frozen"] == [
+            "网页里的视频已播完，画面停在最后一帧（稽核不受影响，仍在继续）"
+        ]
+
+
+class TestCpuProbe:
+    """Attribution, not arithmetic: the line has to name the culprit."""
+
+    def test_the_ceiling_is_the_cgroup_allowance_not_the_host(self, tmp_path, monkeypatch):
+        from computer_use_agent import cpuprobe
+
+        # A four-core allowance carved out of a sixteen-core host. Reading the
+        # host would make every later percentage look four times healthier.
+        quota = tmp_path / "cpu.max"
+        quota.write_text("400000 100000\n")
+        monkeypatch.setattr(cpuprobe, "Path", lambda p: quota if "cpu.max" in p else Path(p))
+        monkeypatch.setattr(cpuprobe.os, "cpu_count", lambda: 16)
+
+        assert cpuprobe.cpu_quota() == 4.0
+
+    def test_an_unlimited_cgroup_falls_back_to_the_core_count(self):
+        from computer_use_agent.cpuprobe import _parse_cpu_max
+
+        assert _parse_cpu_max("max 100000") is None
+        assert _parse_cpu_max("nonsense") is None
+
+    def test_chromiums_many_processes_are_counted_as_one_name(self, monkeypatch):
+        from computer_use_agent import cpuprobe
+
+        # A dozen renderers at 25% each outweigh one ffmpeg at 90%, and
+        # reporting the busiest single pid would say the opposite.
+        before = {i: ("chrome", 0.0) for i in range(1, 13)}
+        before[99] = ("ffmpeg", 0.0)
+        after = {i: ("chrome", 2.5) for i in range(1, 13)}
+        after[99] = ("ffmpeg", 9.0)
+
+        probe = _probe_over(cpuprobe, monkeypatch, before, after)
+        line = probe.report(10.0)
+
+        assert "chrome 300%" in line
+        assert line.index("chrome") < line.index("ffmpeg")
+
+    def test_a_process_that_started_mid_window_counts_all_of_its_time(self, monkeypatch):
+        from computer_use_agent import cpuprobe
+
+        # Clip ffmpegs are born and die inside a fifteen-second window. Charging
+        # them only the part after a snapshot they never appeared in would hide
+        # exactly the spikes worth finding.
+        probe = _probe_over(cpuprobe, monkeypatch, {}, {7: ("ffmpeg", 4.0)})
+
+        assert "ffmpeg 40%" in probe.report(10.0)
+
+    def test_the_line_says_how_much_of_the_allowance_is_gone(self, monkeypatch):
+        from computer_use_agent import cpuprobe
+
+        probe = _probe_over(cpuprobe, monkeypatch, {}, {7: ("python", 30.0)})
+        probe.quota = 4.0
+
+        line = probe.report(10.0)
+        assert "3.0 of 4 cores" in line
+        assert "75% of the allowance" in line
+
+
+class TestSchedulingProbe:
+    """Telling 'nobody scheduled us' apart from 'we blocked our own loop'."""
+
+    def test_a_missing_schedstat_is_said_so_not_reported_as_zero(self, monkeypatch):
+        from computer_use_agent import cpuprobe
+
+        # A fabricated 0ms reads as "definitely not throttled", which is the
+        # one conclusion this probe exists to stop being drawn by accident.
+        monkeypatch.setattr(cpuprobe, "runqueue_wait_seconds", lambda: None)
+        probe = _probe_over(cpuprobe, monkeypatch, {}, {})
+
+        line = probe.scheduling_report(10.0)
+        assert "runqueue wait unavailable" in line
+        assert "0ms (0.0%" not in line
+        probe.stop()
+
+    def test_time_spent_waiting_for_a_cpu_is_reported_as_a_share(self, monkeypatch):
+        from computer_use_agent import cpuprobe
+
+        waits = iter([1.0, 4.0])
+        monkeypatch.setattr(cpuprobe, "runqueue_wait_seconds", lambda: next(waits))
+        probe = _probe_over(cpuprobe, monkeypatch, {}, {})
+
+        line = probe.scheduling_report(10.0)
+        assert "runqueue wait 3000ms (30.0% of the window)" in line
+        probe.stop()
+
+    def test_the_thread_tick_keeps_time_when_nothing_is_in_the_way(self):
+        from computer_use_agent.cpuprobe import ThreadTicker
+
+        ticker = ThreadTicker(0.01)
+        ticker.start()
+        time.sleep(0.25)
+        ticker.stop()
+        ticks = ticker.drain()
+
+        assert len(ticks) > 10
+        # Generous: this asserts the thread is running and timing, not that a
+        # shared CI box can hit 10ms.
+        assert max(ticks) < 200
+
+    def test_draining_the_ticker_twice_does_not_double_count(self):
+        from computer_use_agent.cpuprobe import ThreadTicker
+
+        ticker = ThreadTicker(0.01)
+        ticker.start()
+        time.sleep(0.1)
+        first = ticker.drain()
+        ticker.stop()
+
+        assert first
+        assert ticker.drain() == [] or len(ticker.drain()) < len(first)
+
+
+def _probe_over(module, monkeypatch, before, after):
+    """A CpuProbe whose two snapshots are the two dicts given."""
+    monkeypatch.setattr(module, "_snapshot", lambda: before)
+    probe = module.CpuProbe()
+    monkeypatch.setattr(module, "_snapshot", lambda: after)
+    return probe
+
+
 class TestPreviewChannel:
     """The dashboard feed must never be able to degrade the evidence feed."""
 
@@ -1649,7 +1966,11 @@ class TestPreviewChannel:
         preview = LivePreview(page=page, on_frame=sent.append, fps=50)
         await preview.start()
 
-        assert page.cdp.started["quality"] == 60
+        # q50 at 640x360: the dashboard is for watching progress, and every
+        # viewer is a separate metered stream once it lives on Cloud Run. The
+        # evidence frames are a different feed and stay full quality.
+        assert page.cdp.started["quality"] == 50
+        assert (page.cdp.started["maxWidth"], page.cdp.started["maxHeight"]) == (640, 360)
         await page.cdp.emit("frame-1")
         await page.cdp.emit("frame-2")   # arrives before the pump next ticks
         await asyncio.sleep(0.1)
@@ -1660,6 +1981,46 @@ class TestPreviewChannel:
         assert sent and set(sent) == {"frame-2"}
         assert page.cdp.stopped
 
+    def test_a_cast_that_stopped_producing_is_reported(self, caplog):
+        # Chromium emits on repaint, so a paused page produces nothing while
+        # the pump keeps forwarding the cached frame at the full rate. Every
+        # counter the dashboard has looks healthy; this is the one number that
+        # does not (job 692b53: `screencast in` 0.0 fps for two minutes).
+        import logging
+
+        from computer_use_agent.capture.preview import LivePreview
+
+        live = LivePreview(page=None, on_frame=lambda _: None)
+        live._forwarding = True
+        live._report_at = 1.0
+        live._ticks = 180
+        live._tick_ms = [83.0] * 180
+        live._cast_frames = 0
+
+        with caplog.at_level(logging.WARNING, logger="cctv_audit.preview"):
+            live._pump_report(16.0)
+
+        assert "no screencast frame" in caplog.text
+        assert "still" in caplog.text
+
+    def test_a_cast_still_producing_says_nothing(self, caplog):
+        import logging
+
+        from computer_use_agent.capture.preview import LivePreview
+
+        live = LivePreview(page=None, on_frame=lambda _: None)
+        live._forwarding = True
+        live._report_at = 1.0
+        live._ticks = 180
+        live._tick_ms = [83.0] * 180
+        live._cast_frames = 190
+
+        with caplog.at_level(logging.WARNING, logger="cctv_audit.preview"):
+            live._pump_report(16.0)
+
+        # A warning that fires when nothing is wrong is a warning nobody reads.
+        assert "no screencast frame" not in caplog.text
+
     @pytest.mark.asyncio
     async def test_closing_a_preview_that_never_started_is_safe(self):
         # The pipeline's shutdown path runs whether or not navigation got
@@ -1667,6 +2028,221 @@ class TestPreviewChannel:
         from computer_use_agent.capture.preview import LivePreview
 
         await LivePreview(page=None, on_frame=lambda _: None).aclose()
+
+    # -- only stream while somebody is looking ---------------------------
+    #
+    # Once the dashboard is its own Cloud Run service these frames are metered
+    # egress -- ~1.6 Mbps per viewer, and every viewer is a separate stream.
+    # Most audits run with nobody watching, so the cheapest correct answer is
+    # to send nothing and to draw nothing.
+
+    def _watched_preview(self, monkeypatch, probe):
+        """A preview whose viewer probe is `probe`. Returns (preview, page, sent).
+
+        The probe is driven by the test rather than by a timer: asserting on
+        "how many polls have happened by now" makes the test measure the sleep
+        schedule instead of the behaviour.
+        """
+        from computer_use_agent.capture import preview as preview_mod
+
+        # 5s between checks is right in production and unusable in a test.
+        monkeypatch.setattr(preview_mod, "_VIEWER_POLL_SECONDS", 0.0)
+
+        sent: list[str] = []
+        page = self._FakePage()
+        live = preview_mod.LivePreview(
+            page=page, on_frame=sent.append, fps=100, has_viewers=probe,
+        )
+        return live, page, sent
+
+    @pytest.mark.asyncio
+    async def test_nobody_watching_means_no_frame_is_ever_sent(self, monkeypatch):
+        async def nobody():
+            return False
+
+        live, page, sent = self._watched_preview(monkeypatch, nobody)
+        await live.start()
+        await page.cdp.emit("frame-1")
+        await asyncio.sleep(0.1)
+        await live.aclose()
+
+        # Nothing leaves the container. The screencast itself does run -- see
+        # the next test for why it has to.
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_the_screencast_starts_immediately_even_with_no_audience(self, monkeypatch):
+        # The invariant that keeps Plan B alive. Two screencasts on one page
+        # only behave if the low-resolution one starts first, and the recorder
+        # is constructed after navigation -- so this cast cannot wait for a
+        # viewer to turn up. Deferring it is exactly the bug that starved
+        # ffmpeg of frames and produced an audit with zero windows.
+        async def nobody():
+            return False
+
+        live, page, sent = self._watched_preview(monkeypatch, nobody)
+        await live.start()
+        assert page.cdp.started is not None, "cast must be live before any recorder exists"
+        await asyncio.sleep(0.05)
+        assert not page.cdp.stopped, "must not be stopped while the session runs"
+        await live.aclose()
+
+    @pytest.mark.asyncio
+    async def test_the_picture_appears_when_someone_opens_the_page(self, monkeypatch):
+        watching = {"now": False}
+
+        async def probe():
+            return watching["now"]
+
+        live, page, sent = self._watched_preview(monkeypatch, probe)
+        await live.start()
+        await page.cdp.emit("frame-1")
+        await asyncio.sleep(0.05)
+        assert sent == [], "still nobody there"
+
+        watching["now"] = True
+        await asyncio.sleep(0.05)
+        await live.aclose()
+        # Repeats are expected: the pump ticks at `fps` and forwards whatever
+        # the latest frame is, so a static page resends the same one.
+        assert set(sent) == {"frame-1"}
+
+    @pytest.mark.asyncio
+    async def test_the_last_viewer_leaving_stops_the_frames_not_the_cast(self, monkeypatch):
+        watching = {"now": True}
+
+        async def probe():
+            return watching["now"]
+
+        live, page, sent = self._watched_preview(monkeypatch, probe)
+        await live.start()
+        await asyncio.sleep(0.05)
+        await page.cdp.emit("frame-1")
+        await asyncio.sleep(0.05)
+        assert sent, "someone was watching, so frames should have flowed"
+
+        watching["now"] = False
+        await asyncio.sleep(0.05)
+        # Egress stops; the cast does not. Calling stopScreencast here would
+        # also stop the recorder's, which shares the page.
+        assert not page.cdp.stopped
+
+        before = len(sent)
+        await page.cdp.emit("frame-2")
+        await asyncio.sleep(0.05)
+        await live.aclose()
+
+        assert len(sent) == before, "frames must stop when the audience does"
+        assert "frame-2" not in sent
+
+    @pytest.mark.asyncio
+    async def test_a_dashboard_that_cannot_be_reached_counts_as_nobody(self, monkeypatch):
+        # Erring the other way would stream a live CCTV feed at a service that
+        # is not answering, for as long as the audit runs.
+        async def unreachable():
+            raise RuntimeError("dashboard down")
+
+        live, page, sent = self._watched_preview(monkeypatch, unreachable)
+        await live.start()
+        await page.cdp.emit("frame-1")
+        await asyncio.sleep(0.1)
+        await live.aclose()
+
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_a_slow_viewer_check_does_not_slow_the_frames(self, monkeypatch):
+        """The cloud bug, in miniature.
+
+        The check used to be awaited inside the pump loop, so the frame rate
+        became a function of how long the dashboard took to answer. Measured on
+        job c70488: ~1s per answer against a 2s poll, and the pump delivered
+        0.6-3.2 fps against a configured 12 -- with nothing dropped by the
+        in-flight cap and 140ms posts. It was only ever waiting.
+        """
+        from computer_use_agent.capture import preview as preview_mod
+
+        monkeypatch.setattr(preview_mod, "_VIEWER_POLL_SECONDS", 0.0)
+
+        async def slow():
+            # Longer than the whole measurement window below. If this is on the
+            # pump's loop, the pump gets exactly one tick.
+            await asyncio.sleep(0.5)
+            return True
+
+        sent: list[str] = []
+        page = self._FakePage()
+        live = preview_mod.LivePreview(
+            page=page, on_frame=sent.append, fps=100, has_viewers=slow,
+        )
+        await live.start()
+        live._forwarding = True     # as if the first check had already said yes
+        await page.cdp.emit("frame-1")
+        await asyncio.sleep(0.2)
+        await live.aclose()
+
+        # 100 fps for 0.2s is ~20 ticks. Ten is a wide margin that still fails
+        # loudly if the network call is ever put back on the loop.
+        assert len(sent) > 10, f"the pump stalled behind the viewer check ({len(sent)} frames)"
+
+    @pytest.mark.asyncio
+    async def test_one_missed_viewer_check_does_not_blank_the_screen(self, monkeypatch):
+        # The dashboard's client gives up after 1.5s, and a check that gives up
+        # is indistinguishable from "nobody is there". In the cloud that
+        # happened constantly: the container logged paused/resumed about twice
+        # a second with a viewer connected the whole time.
+        from computer_use_agent.capture import preview as preview_mod
+
+        monkeypatch.setattr(preview_mod, "_VIEWER_POLL_SECONDS", 0.0)
+        answers = [True, True, RuntimeError("timed out"), True, True]
+
+        async def flaky():
+            answer = answers.pop(0) if answers else True
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        sent: list[str] = []
+        page = self._FakePage()
+        live = preview_mod.LivePreview(
+            page=page, on_frame=sent.append, fps=100, has_viewers=flaky,
+        )
+        await live.start()
+        await page.cdp.emit("frame-1")
+        while answers:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.02)
+        await live.aclose()
+
+        assert live._forwarding, "one blip must not pause the preview"
+
+    @pytest.mark.asyncio
+    async def test_two_misses_in_a_row_still_stop_the_stream(self, monkeypatch):
+        # The other half: a dashboard that is genuinely gone must not keep
+        # being sent a live CCTV feed for the rest of the audit.
+        from computer_use_agent.capture import preview as preview_mod
+
+        monkeypatch.setattr(preview_mod, "_VIEWER_POLL_SECONDS", 0.0)
+        state = {"up": True}
+
+        async def probe():
+            if not state["up"]:
+                raise RuntimeError("dashboard down")
+            return True
+
+        sent: list[str] = []
+        page = self._FakePage()
+        live = preview_mod.LivePreview(
+            page=page, on_frame=sent.append, fps=100, has_viewers=probe,
+        )
+        await live.start()
+        await asyncio.sleep(0.02)
+        assert live._forwarding
+        state["up"] = False
+        await asyncio.sleep(0.05)
+        await live.aclose()
+
+        assert not live._forwarding
 
     class _FakeCdp:
         def __init__(self):
@@ -1699,31 +2275,632 @@ class TestPreviewChannel:
             self.context = _Context()
 
     def test_a_slow_link_drops_frames_instead_of_queueing_them(self):
-        from computer_use_agent.monitor import BrowserMonitorClient
+        from computer_use_agent.monitor import (
+            _MAX_FRAMES_IN_FLIGHT, BrowserMonitorClient)
 
         client = BrowserMonitorClient()
         sent = []
         client._fire_and_forget = lambda payload, on_done=None: sent.append(on_done)
 
-        client.update_frame_b64("a")
-        # Second frame arrives before the first POST completes.
-        client.update_frame_b64("b")
-        assert len(sent) == 1 and client._frames_dropped == 1
+        # Fill every slot, then push one more before any POST has completed.
+        for i in range(_MAX_FRAMES_IN_FLIGHT):
+            client.update_frame_b64(f"f{i}")
+        assert len(sent) == _MAX_FRAMES_IN_FLIGHT and client._frames_dropped == 0
 
-        sent[0]()  # the first POST finally lands
-        client.update_frame_b64("c")
-        assert len(sent) == 2 and client._frames_dropped == 1
+        client.update_frame_b64("overflow")
+        assert len(sent) == _MAX_FRAMES_IN_FLIGHT and client._frames_dropped == 1
+
+        sent[0]()  # one POST finally lands, freeing exactly one slot
+        client.update_frame_b64("next")
+        assert len(sent) == _MAX_FRAMES_IN_FLIGHT + 1 and client._frames_dropped == 1
+
+    def test_the_cap_is_more_than_one_so_latency_is_not_the_frame_rate(self):
+        # A cap of one makes the round trip to the dashboard the frame rate: a
+        # measured cloud run delivered 0.5 fps while PREVIEW_FPS said 12, and
+        # nothing reported it because dropping frames is by design. Pinning
+        # this so the constant cannot quietly go back to 1.
+        from computer_use_agent.monitor import _MAX_FRAMES_IN_FLIGHT
+
+        assert _MAX_FRAMES_IN_FLIGHT > 1
 
     def test_a_failed_send_does_not_wedge_the_channel_shut(self):
-        # The in-flight flag is only safe if it is always released. A send that
+        # The in-flight count is only safe if it is always released. A send that
         # cannot even be scheduled must not stop the preview forever.
         from computer_use_agent.monitor import BrowserMonitorClient
 
         client = BrowserMonitorClient()
         client.update_frame_b64("a")  # no running loop -> _fire_and_forget bails
-        assert client._frame_in_flight is False
+        assert client._frames_in_flight == 0
         client.update_frame_b64("b")
         assert client._frames_dropped == 0
+
+    def test_releasing_more_than_was_sent_cannot_uncap_the_sender(self):
+        # `_fire_and_forget` releases synchronously when there is no loop, so a
+        # stray extra release is reachable. A counter allowed below zero would
+        # turn the cap into an unbounded queue -- the exact pile-up it exists
+        # to prevent.
+        from computer_use_agent.monitor import (
+            _MAX_FRAMES_IN_FLIGHT, BrowserMonitorClient)
+
+        client = BrowserMonitorClient()
+        for _ in range(5):
+            client._frame_sent()
+        assert client._frames_in_flight == 0
+
+        sent = []
+        client._fire_and_forget = lambda payload, on_done=None: sent.append(on_done)
+        for i in range(_MAX_FRAMES_IN_FLIGHT + 3):
+            client.update_frame_b64(f"f{i}")
+        assert len(sent) == _MAX_FRAMES_IN_FLIGHT
+
+    def test_what_happened_to_the_preview_is_said_out_loud(self, caplog):
+        # The dashboard has been called a slideshow twice, and both times the
+        # investigation stalled here: dropping frames is the designed behaviour
+        # of the cap, so it was silent, and the counter it bumps was only ever
+        # read in tests. Without this line the next investigation guesses too.
+        import logging
+
+        from computer_use_agent.monitor import (
+            _MAX_FRAMES_IN_FLIGHT, BrowserMonitorClient)
+
+        client = BrowserMonitorClient(job_id="d7680d")
+        sent = []
+        client._fire_and_forget = lambda payload, on_done=None: sent.append(on_done)
+
+        # The whole exercise is inside the capture, not just the last call: a
+        # dropped frame reports too, so the line can land during the loop and
+        # then not again. Capturing only the tail made this test pass or fail
+        # on whether some earlier test had already raised the root log level.
+        with caplog.at_level(logging.INFO, logger="cctv_audit.monitor"):
+            # Backdated so the report is due on the next frame, not in 15s.
+            client._report_at = time.monotonic() - 20.0
+            for i in range(_MAX_FRAMES_IN_FLIGHT + 5):
+                client.update_frame_b64("x" * 1024)
+            sent[0]()
+
+        line = caplog.text
+        assert "d7680d" in line          # which audit, when two share a container
+        assert "dropped" in line and "POST median" in line
+        assert "KB/frame" in line
+
+    def test_the_report_does_not_run_on_every_frame(self, caplog):
+        # At 12 fps a per-frame line is 43,000 entries an hour, which is both a
+        # bill and a reason nobody reads the log.
+        import logging
+
+        from computer_use_agent.monitor import BrowserMonitorClient
+
+        client = BrowserMonitorClient()
+        client._fire_and_forget = lambda payload, on_done=None: None
+        with caplog.at_level(logging.INFO, logger="cctv_audit.monitor"):
+            for _ in range(50):
+                client.update_frame_b64("x")
+
+        assert "preview" not in caplog.text
+
+
+class TestWhichProjectWeAreIn:
+    """Agent Runtime sets GOOGLE_CLOUD_PROJECT to the project *number* and will
+    not let the deployment override it. A named Firestore database is not
+    addressable by number -- the client gets a 404 saying the database does not
+    exist, while it plainly does -- so the deployment passes the id separately
+    and that is the one that has to win."""
+
+    @staticmethod
+    def _project(monkeypatch, **env):
+        from computer_use_agent.config import Config
+
+        for name in ("GCP_PROJECT", "GOOGLE_CLOUD_PROJECT"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        return Config().gcp_project
+
+    def test_the_explicit_id_beats_the_number_the_platform_injects(self, monkeypatch):
+        assert self._project(
+            monkeypatch,
+            GCP_PROJECT="study-project-496907",
+            GOOGLE_CLOUD_PROJECT="596821501265",
+        ) == "study-project-496907"
+
+    def test_nothing_changes_for_anyone_who_only_sets_the_usual_one(self, monkeypatch):
+        assert self._project(
+            monkeypatch, GOOGLE_CLOUD_PROJECT="study-project-496907",
+        ) == "study-project-496907"
+
+    def test_neither_set_is_empty_rather_than_a_guess(self, monkeypatch):
+        # config.validate() turns this into a readable complaint. Guessing a
+        # project here would write a customer's audit into someone else's.
+        assert self._project(monkeypatch) == ""
+
+
+class TestNotBillingSomeoneElsesProject:
+    """Agent Runtime's credentials arrive with a quota project already on them.
+    Anything built from them sends `x-goog-user-project`, GCS reads that as
+    "bill this project", and an agent service account without
+    `serviceusage.services.use` gets a 403 that names the *storage* object and
+    blames the wrong role. Stripping the quota project is what keeps the SOP
+    fetch and the evidence upload working."""
+
+    class _Creds:
+        def __init__(self, quota):
+            self.quota_project_id = quota
+
+        def with_quota_project(self, quota):
+            return type(self)(quota)
+
+    def _patch_adc(self, monkeypatch, result):
+        import google.auth
+
+        def fake_default(*args, **kwargs):
+            if isinstance(result, Exception):
+                raise result
+            return result, "some-project"
+
+        monkeypatch.setattr(google.auth, "default", fake_default)
+
+    def test_the_quota_project_is_taken_off(self, monkeypatch):
+        from computer_use_agent.gcp import credentials_without_quota_project
+
+        self._patch_adc(monkeypatch, self._Creds("596821501265"))
+        assert credentials_without_quota_project().quota_project_id is None
+
+    def test_credentials_that_cannot_carry_one_are_passed_through(self, monkeypatch):
+        # Some credential types have no `with_quota_project`. They also never
+        # send the header, so there is nothing to strip.
+        from computer_use_agent.gcp import credentials_without_quota_project
+
+        class Plain:
+            pass
+
+        plain = Plain()
+        self._patch_adc(monkeypatch, plain)
+        assert credentials_without_quota_project() is plain
+
+    def test_no_credentials_at_all_is_none_not_a_crash(self, monkeypatch):
+        # Locally, and in this suite, there may be no ADC. Returning None lets
+        # the client fall back to its own default and fail with its own message
+        # instead of this helper's.
+        from computer_use_agent.gcp import credentials_without_quota_project
+
+        self._patch_adc(monkeypatch, RuntimeError("could not automatically determine"))
+        assert credentials_without_quota_project() is None
+
+
+class TestTheSopErrorSaysWhatIsWrong:
+    """The refusal a customer reads is the only copy of the error anyone sees --
+    it is caught, stored on the job, and never re-raised. A GCS permission
+    message names the missing permission around 240 characters in, so clipping
+    at 200 threw away the one word that mattered and left a sentence pointing at
+    the wrong role."""
+
+    def test_the_missing_permission_survives_the_clip(self, monkeypatch):
+        import asyncio
+        import types
+
+        from computer_use_agent.analyzer import sop as sop_mod
+
+        real = (
+            "403 GET https://storage.googleapis.com/download/storage/v1/b/"
+            "study-project-496907-cctv-audit/o/sop%2Fchagee-store-v1.yaml?alt=media: "
+            "cctv-audit-agent@study-project-496907.iam.gserviceaccount.com does not "
+            "have serviceusage.services.use access to the Google Cloud project. "
+            "Permission 'serviceusage.services.use' denied on resource (or it may "
+            "not exist)."
+        )
+        monkeypatch.setattr(sop_mod, "config", types.SimpleNamespace(
+            sop_bucket="study-project-496907-cctv-audit", sop_prefix="sop",
+            gcp_project="study-project-496907"))
+
+        async def boom(fn, *args, **kwargs):
+            raise RuntimeError(real)
+
+        monkeypatch.setattr(asyncio, "to_thread", boom)
+        with pytest.raises(sop_mod.SopUnavailable) as caught:
+            asyncio.run(sop_mod._fetch_sop("chagee-store-v1"))
+        assert "serviceusage.services.use" in str(caught.value)
+        assert "gs://study-project-496907-cctv-audit/sop/chagee-store-v1.yaml" in str(caught.value)
+
+    def test_a_runaway_error_is_still_cut(self, monkeypatch):
+        import asyncio
+        import types
+
+        from computer_use_agent.analyzer import sop as sop_mod
+
+        monkeypatch.setattr(sop_mod, "config", types.SimpleNamespace(
+            sop_bucket="b", sop_prefix="", gcp_project="p"))
+
+        async def boom(fn, *args, **kwargs):
+            raise RuntimeError("x" * 5000)
+
+        monkeypatch.setattr(asyncio, "to_thread", boom)
+        with pytest.raises(sop_mod.SopUnavailable) as caught:
+            asyncio.run(sop_mod._fetch_sop("v1"))
+        assert len(str(caught.value)) < 800
+
+
+class TestOnlyNamedOriginsSeeOurIdentity:
+    """The demo footage sits on a Cloud Run service that cannot be made public
+    -- the org policy refuses `allUsers` -- so the container's browser and its
+    ffmpeg both have to present a Google ID token to read it. The token is this
+    deployment's own identity, so the rule that matters is not "does it get
+    sent" but "does it get sent anywhere else". Every test here is about the
+    second half."""
+
+    @staticmethod
+    def _origins(monkeypatch, raw):
+        from computer_use_agent.config import Config
+
+        monkeypatch.setenv("OIDC_ORIGINS", raw)
+        return Config().oidc_origins
+
+    def test_the_operator_can_be_sloppy_about_the_form(self, monkeypatch):
+        # Trailing slash, a path, a capital host, and a bare hostname are all
+        # the same origin. An allow-list that missed on a slash would fail in
+        # the confusing direction: the request goes out bare and 403s.
+        assert self._origins(monkeypatch, "https://demo.a.run.app/") == ("https://demo.a.run.app",)
+        assert self._origins(monkeypatch, "https://demo.a.run.app/hls.html") == ("https://demo.a.run.app",)
+        assert self._origins(monkeypatch, "https://DEMO.A.Run.App") == ("https://demo.a.run.app",)
+        assert self._origins(monkeypatch, "demo.a.run.app") == ("https://demo.a.run.app",)
+
+    def test_several_origins_keep_their_order_and_lose_duplicates(self, monkeypatch):
+        assert self._origins(
+            monkeypatch, "https://a.run.app, https://b.run.app ,https://a.run.app/"
+        ) == ("https://a.run.app", "https://b.run.app")
+
+    def test_unset_means_nobody(self, monkeypatch):
+        # The default, and the only configuration that has run against
+        # bilibili. Empty here is what makes every other site token-free.
+        monkeypatch.delenv("OIDC_ORIGINS", raising=False)
+        from computer_use_agent.config import Config
+
+        assert Config().oidc_origins == ()
+        assert self._origins(monkeypatch, "  ,  ") == ()
+
+    @staticmethod
+    def _patch_minting(monkeypatch, origins, *, record=None):
+        import types
+
+        from computer_use_agent import gcp as gcp_mod
+        from google.oauth2 import id_token as google_id_token
+
+        gcp_mod.reset_id_token_cache()
+        monkeypatch.setattr(gcp_mod, "config",
+                            types.SimpleNamespace(oidc_origins=tuple(origins)))
+
+        calls = record if record is not None else []
+
+        def fake_fetch(request, audience):
+            calls.append(audience)
+            return f"token-for-{audience}"
+
+        monkeypatch.setattr(google_id_token, "fetch_id_token", fake_fetch)
+        return calls
+
+    def test_a_listed_origin_gets_a_token_audienced_at_itself(self, monkeypatch):
+        from computer_use_agent.gcp import id_token_for
+
+        calls = self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
+        assert id_token_for("https://demo.a.run.app/hls/index.m3u8") == \
+            "token-for-https://demo.a.run.app"
+        # The audience is the origin, not the full URL: Cloud Run checks the
+        # token against the service, and a per-segment audience would be
+        # rejected -- and would mint one token per segment besides.
+        assert calls == ["https://demo.a.run.app"]
+
+    def test_everywhere_else_gets_nothing_and_mints_nothing(self, monkeypatch):
+        from computer_use_agent.gcp import id_token_for
+
+        calls = self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
+        for url in (
+            "https://www.bilibili.com/video/BV1",
+            "https://demo.a.run.app.evil.example/hls.html",  # suffix, not the origin
+            "http://demo.a.run.app/hls.html",                # scheme is part of it
+            "https://cdn.example.com/seg0001.ts",
+        ):
+            assert id_token_for(url) is None, url
+        # Not just "returned None" -- no token was ever created. A mint that
+        # happened and was then discarded would still be one this deployment
+        # could leak somewhere else later.
+        assert calls == []
+
+    def test_the_token_is_minted_once_and_reused(self, monkeypatch):
+        from computer_use_agent.gcp import id_token_for
+
+        calls = self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
+        for _ in range(50):  # roughly one HLS segment each
+            id_token_for("https://demo.a.run.app/hls/seg0001.ts")
+        assert calls == ["https://demo.a.run.app"]
+
+    def test_a_stale_token_is_replaced(self, monkeypatch):
+        from computer_use_agent.gcp import id_token_for
+
+        calls = self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
+        url = "https://demo.a.run.app/store.mp4"
+        id_token_for(url, now=0.0)
+        id_token_for(url, now=2999.0)     # still inside the hour
+        assert len(calls) == 1
+        id_token_for(url, now=3001.0)     # past it
+        assert len(calls) == 2
+
+    def test_ffmpeg_gets_the_header_for_the_media_url_not_the_page(self, monkeypatch):
+        # The page and its media are not always on the same host. Putting the
+        # token in the shared header block would hand it to whichever CDN the
+        # player pulls from, and the audit would succeed either way, so nothing
+        # would ever surface it.
+        from computer_use_agent.capture.probe import StreamProbe
+
+        self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
+        base = {"Referer": "https://demo.a.run.app/hls.html", "Cookie": "a=b"}
+
+        protected = StreamProbe._headers_for("https://demo.a.run.app/hls/index.m3u8", base)
+        assert protected["Authorization"] == "Bearer token-for-https://demo.a.run.app"
+        assert protected["Cookie"] == "a=b"        # the existing ones survive
+        assert "Authorization" not in base         # and the shared block is untouched
+
+        elsewhere = StreamProbe._headers_for("https://cdn.example.com/seg0001.ts", base)
+        assert "Authorization" not in elsewhere
+        assert elsewhere == base
+
+    def test_the_browser_route_is_scoped_to_the_origin(self, monkeypatch):
+        import asyncio
+        import types
+
+        from computer_use_agent import pipeline as pipeline_mod
+
+        self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
+        monkeypatch.setattr(pipeline_mod, "config", types.SimpleNamespace(
+            oidc_origins=("https://demo.a.run.app",)))
+
+        routes = []
+
+        class FakeContext:
+            async def route(self, pattern, handler):
+                routes.append((pattern, handler))
+
+        asyncio.run(pipeline_mod._attach_oidc_headers(FakeContext()))
+
+        # The pattern is the guard. A `**/*` route with the check inside the
+        # handler would work today and would be one early return away from
+        # posting our identity to bilibili.
+        assert [p for p, _ in routes] == ["https://demo.a.run.app/**"]
+
+        class FakeRoute:
+            def __init__(self):
+                self.request = types.SimpleNamespace(
+                    headers={"referer": "https://demo.a.run.app/hls.html"})
+                self.sent = None
+
+            async def continue_(self, headers=None):
+                self.sent = headers
+
+        handler = routes[0][1]
+        # Exactly one parameter. Playwright reads the arity and calls a
+        # two-parameter handler as `(route, request)` -- so writing the token
+        # capture as `async def h(route, _hdr=token)` binds `_hdr` to a Request
+        # object, and every navigation dies sixty seconds later as a page-load
+        # timeout that says nothing about routing. Measured, not theorised.
+        import inspect
+
+        assert len(inspect.signature(handler).parameters) == 1
+
+        fake = FakeRoute()
+        asyncio.run(handler(fake))
+        assert fake.sent["authorization"] == "Bearer token-for-https://demo.a.run.app"
+        assert fake.sent["referer"] == "https://demo.a.run.app/hls.html"
+
+    def test_no_origins_means_no_routes_at_all(self, monkeypatch):
+        import asyncio
+        import types
+
+        from computer_use_agent import pipeline as pipeline_mod
+
+        monkeypatch.setattr(pipeline_mod, "config",
+                            types.SimpleNamespace(oidc_origins=()))
+
+        class FakeContext:
+            async def route(self, pattern, handler):
+                raise AssertionError(f"registered a route for {pattern}")
+
+        asyncio.run(pipeline_mod._attach_oidc_headers(FakeContext()))
+
+
+class TestTalkingToARemoteDashboard:
+    """Once the dashboard is its own Cloud Run service, "post to the dashboard"
+    stops being a loopback write and becomes an authenticated internet call.
+    Two things have to be right: the address, and the two separate credentials
+    a `--no-allow-unauthenticated` service demands."""
+
+    @staticmethod
+    def _client(monkeypatch, *, url="", token="s3cret"):
+        import types
+        from computer_use_agent import config as config_mod
+        from computer_use_agent.monitor import BrowserMonitorClient
+
+        monkeypatch.setattr(config_mod, "config", types.SimpleNamespace(
+            monitor_port=8080, monitor_token=token, monitor_url=url,
+            screen_width=1920, screen_height=1080,
+        ))
+        return BrowserMonitorClient()
+
+    class _Response:
+        def __init__(self, status, body=None):
+            self.status = status
+            self._body = body or {}
+
+        async def json(self):
+            return self._body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Session:
+        """Records what was sent, so the assertions can be about headers."""
+
+        def __init__(self, response):
+            self._response = response
+            self.calls = []
+
+        def get(self, url, params=None, headers=None):
+            self.calls.append((url, headers or {}, params or {}))
+            if isinstance(self._response, Exception):
+                raise self._response
+            return self._response
+
+    def test_no_monitor_url_still_means_the_process_next_door(self, monkeypatch):
+        # The local `adk web` path must keep working untouched.
+        client = self._client(monkeypatch)
+        assert client.base_url == "http://127.0.0.1:8080"
+
+    def test_a_configured_dashboard_is_where_everything_is_sent(self, monkeypatch):
+        client = self._client(monkeypatch, url="https://cctv-monitor-x.a.run.app")
+        assert client.base_url == "https://cctv-monitor-x.a.run.app"
+
+    @pytest.mark.asyncio
+    async def test_loopback_needs_no_google_token_and_asks_for_none(self, monkeypatch):
+        # Fetching one locally would fail and log a scary warning about an
+        # authentication problem that does not exist.
+        client = self._client(monkeypatch)
+        asked = []
+        monkeypatch.setattr(client, "_identity_token",
+                            lambda: asked.append(1) or "")
+
+        headers = await client._headers()
+        assert headers == {"X-Monitor-Token": "s3cret"}
+        assert asked == [], "no identity token should be fetched for 127.0.0.1"
+
+    @pytest.mark.asyncio
+    async def test_cloud_run_gets_both_credentials(self, monkeypatch):
+        # X-Monitor-Token is what our app checks; the bearer is what Cloud Run
+        # checks before our app is ever reached. Neither substitutes for the other.
+        client = self._client(monkeypatch, url="https://dash.run.app")
+
+        async def fake_token():
+            return "id-token-abc"
+
+        monkeypatch.setattr(client, "_identity_token", fake_token)
+        assert await client._headers() == {
+            "X-Monitor-Token": "s3cret",
+            "Authorization": "Bearer id-token-abc",
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_token_is_fetched_once_and_then_reused(self, monkeypatch):
+        # One metadata-server round trip per frame would be absurd at 8 fps.
+        client = self._client(monkeypatch, url="https://dash.run.app")
+        fetched = []
+
+        def fetch(_request, audience):
+            fetched.append(audience)
+            return "tok"
+
+        monkeypatch.setattr(
+            "google.oauth2.id_token.fetch_id_token", fetch, raising=False)
+        assert await client._identity_token() == "tok"
+        assert await client._identity_token() == "tok"
+        assert fetched == ["https://dash.run.app"], "audience is the dashboard URL"
+
+    @pytest.mark.asyncio
+    async def test_no_credentials_warns_once_and_keeps_going(self, monkeypatch, caplog):
+        # A workstation has user credentials, which cannot mint an ID token.
+        # That is a normal local run, not a reason to take the audit down.
+        client = self._client(monkeypatch, url="https://dash.run.app")
+
+        def fetch(_request, _audience):
+            raise RuntimeError("no service account")
+
+        monkeypatch.setattr(
+            "google.oauth2.id_token.fetch_id_token", fetch, raising=False)
+        with caplog.at_level(logging.WARNING, logger="cctv_audit.monitor"):
+            assert await client._identity_token() == ""
+            assert await client._identity_token() == ""
+        assert len([r for r in caplog.records if "identity token" in r.message]) == 1
+        # And the call still goes out, carrying what it does have.
+        assert await client._headers() == {"X-Monitor-Token": "s3cret"}
+
+    @pytest.mark.asyncio
+    async def test_the_viewer_count_is_read_from_the_dashboard(self, monkeypatch):
+        client = self._client(monkeypatch)
+        session = self._Session(self._Response(200, {"viewers": 3}))
+
+        async def get_session():
+            return session
+
+        monkeypatch.setattr(client, "_get_session", get_session)
+        assert await client.viewers() == 3
+        url, headers, params = session.calls[0]
+        assert url.endswith("/api/viewers")
+        assert headers["X-Monitor-Token"] == "s3cret", "the count is not public"
+        assert params == {}, "the shared client asks about the shared room"
+
+    @pytest.mark.asyncio
+    async def test_a_job_scoped_client_only_counts_its_own_viewers(self, monkeypatch):
+        # Otherwise a colleague watching a different audit keeps this one
+        # streaming frames at nobody.
+        from computer_use_agent.monitor import monitor_for_job
+
+        client = self._client(monkeypatch)
+        scoped = monitor_for_job("abc123")
+        scoped.base_url, scoped.token = client.base_url, client.token
+        session = self._Session(self._Response(200, {"viewers": 1}))
+
+        async def get_session():
+            return session
+
+        monkeypatch.setattr(scoped, "_get_session", get_session)
+        assert await scoped.viewers() == 1
+        assert session.calls[0][2] == {"job": "abc123"}
+
+    @pytest.mark.asyncio
+    async def test_a_job_scoped_client_stamps_every_event(self, monkeypatch):
+        # Stamped centrally, because one event type missed would show up as a
+        # card on somebody else's dashboard -- a symptom nobody would trace
+        # back to a missing field.
+        from computer_use_agent.monitor import monitor_for_job
+
+        scoped = monitor_for_job("abc123")
+        posted = []
+
+        class _Post:
+            async def __aenter__(self_inner):
+                return None
+
+            async def __aexit__(self_inner, *_a):
+                return False
+
+        class _S:
+            def post(self_inner, url, json=None, headers=None):
+                posted.append(json)
+                return _Post()
+
+        async def get_session():
+            return _S()
+
+        async def no_headers():
+            return {}
+
+        monkeypatch.setattr(scoped, "_get_session", get_session)
+        monkeypatch.setattr(scoped, "_headers", no_headers)
+        await scoped._post_event({"type": "frame", "frame": "xyz"})
+        assert posted == [{"type": "frame", "frame": "xyz", "job_id": "abc123"}]
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_dashboard_counts_as_nobody(self, monkeypatch):
+        # Not an exception, and not "assume someone is there". Guessing the
+        # optimistic way streams a live CCTV feed at a service that is gone.
+        client = self._client(monkeypatch)
+
+        for outcome in (OSError("connection refused"), self._Response(404)):
+            session = self._Session(outcome)
+
+            async def get_session(_s=session):
+                return _s
+
+            monkeypatch.setattr(client, "_get_session", get_session)
+            assert await client.viewers() == 0
 
 
 class TestPlayerGeometryIsHeld:
@@ -2093,3 +3270,106 @@ class TestTheReportReadsAsATimeline:
             "requested_start_seconds": 0.0, "requested_end_seconds": None,
             "covered_from_seconds": 0.0, "covered_to_seconds": 15.0,
         }
+
+
+class TestDashboardRooms:
+    """One service, several audits, and footage that must not cross over.
+
+    The dashboard is a single Cloud Run service that every audit posts to and
+    every customer opens. Before rooms it held one global state dict and one
+    set of sockets, so two concurrent audits overwrote each other's picture and
+    both viewers saw whichever frame landed last -- live CCTV of identifiable
+    staff, shown to whoever happened to be watching something else.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_rooms(self):
+        from computer_use_agent import monitor_server as ms
+
+        ms._rooms.clear()
+        ms._rooms[""] = ms.Room("")
+        yield
+        ms._rooms.clear()
+        ms._rooms[""] = ms.Room("")
+
+    @staticmethod
+    def _client():
+        from fastapi.testclient import TestClient
+        from computer_use_agent.monitor_server import app
+
+        return TestClient(app)
+
+    def test_a_frame_reaches_its_own_room_and_no_other(self):
+        client = self._client()
+        with client.websocket_connect("/ws?job=alice") as alice, \
+             client.websocket_connect("/ws?job=bob") as bob:
+            alice.receive_json()          # the state each viewer gets on join
+            bob.receive_json()
+
+            client.post("/api/event",
+                        json={"type": "frame", "frame": "ALICE-FRAME", "job_id": "alice"})
+
+            assert alice.receive_json()["frame"] == "ALICE-FRAME"
+
+            # And Bob's socket has nothing on it. Proven by making Bob's own
+            # frame arrive next: if Alice's had leaked, this would read it.
+            client.post("/api/event",
+                        json={"type": "frame", "frame": "BOB-FRAME", "job_id": "bob"})
+            assert bob.receive_json()["frame"] == "BOB-FRAME"
+
+    def test_two_audits_do_not_overwrite_each_others_state(self):
+        client = self._client()
+        for job, url in (("alice", "https://a"), ("bob", "https://b")):
+            client.post("/api/event",
+                        json={"type": "state", "data": {"current_url": url}, "job_id": job})
+
+        assert client.get("/api/state", params={"job": "alice"}).json()["current_url"] == "https://a"
+        assert client.get("/api/state", params={"job": "bob"}).json()["current_url"] == "https://b"
+
+    def test_the_viewer_count_is_per_room(self):
+        # The audit turns its stream off when this is zero. Counting everyone
+        # on the service would keep every audit streaming for as long as any
+        # one person had any dashboard open.
+        client = self._client()
+        with client.websocket_connect("/ws?job=alice") as alice:
+            alice.receive_json()
+            assert client.get("/api/viewers", params={"job": "alice"}).json()["viewers"] == 1
+            assert client.get("/api/viewers", params={"job": "bob"}).json()["viewers"] == 0
+
+    def test_a_viewer_who_arrives_late_is_caught_up(self):
+        # The link goes out when the audit starts; people click it whenever.
+        client = self._client()
+        client.post("/api/event",
+                    json={"type": "frame", "frame": "EARLIER", "job_id": "alice"})
+        with client.websocket_connect("/ws?job=alice") as alice:
+            assert alice.receive_json()["type"] == "state"
+            assert alice.receive_json()["frame"] == "EARLIER"
+
+    def test_no_job_id_is_the_local_single_audit_case(self):
+        # `adk web`: one audit, one page, nobody passing a job id. This is the
+        # behaviour the whole server had before rooms existed.
+        client = self._client()
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()
+            client.post("/api/event", json={"type": "frame", "frame": "LOCAL"})
+            assert ws.receive_json()["frame"] == "LOCAL"
+
+    def test_idle_rooms_are_evicted_before_the_cap(self):
+        # `/api/event` is authenticated, but a bug upstream that stamped a
+        # fresh id on every frame would otherwise be a slow memory leak.
+        from computer_use_agent import monitor_server as ms
+
+        client = self._client()
+        for i in range(ms._MAX_ROOMS + 20):
+            client.post("/api/event", json={"type": "frame", "frame": "x", "job_id": f"j{i}"})
+        assert len(ms._rooms) <= ms._MAX_ROOMS
+
+    def test_a_watched_room_is_never_evicted(self):
+        from computer_use_agent import monitor_server as ms
+
+        client = self._client()
+        with client.websocket_connect("/ws?job=keepme") as ws:
+            ws.receive_json()
+            for i in range(ms._MAX_ROOMS + 20):
+                client.post("/api/event", json={"type": "frame", "frame": "x", "job_id": f"j{i}"})
+            assert "keepme" in ms._rooms

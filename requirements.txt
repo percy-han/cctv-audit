@@ -19,3 +19,10 @@ uvicorn>=0.29.0
 pydantic>=2.6.0
 python-dotenv>=1.0.0
 PyYAML>=6.0
+
+# Only imported when the matching setting is present -- FIRESTORE_DATABASE,
+# ARTIFACTS_BUCKET, SOP_BUCKET -- so a workstation run and the whole test suite
+# work without them. They are listed because the Agent Runtime image needs them
+# and a missing one there is a job that dies mid-audit.
+google-cloud-firestore>=2.16.0
+google-cloud-storage>=2.16.0

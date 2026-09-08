@@ -17,5 +17,12 @@ auth/
 # people, so they stay local.
 computer_use_agent/checkpoints/
 
+# The demo footage, which `deploy/demovideo/make_assets.sh` renders from
+# nothing in about a minute. Committing it would put 1.7 MB of synthetic MP4
+# and a few hundred .ts segments in the history for no gain -- the recipe is
+# the thing worth versioning, not its output. Run the script before building
+# the image.
+deploy/demovideo/assets/
+
 BRD.md
 SDD.md

@@ -23,13 +23,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import subprocess
+import time
 from typing import Optional
+from urllib.parse import urlsplit
 
 import google.auth
 import google.auth.transport.requests
 from google import genai
-from google.auth.credentials import Credentials as BaseCredentials
 
 from .config import config
 
@@ -38,24 +38,122 @@ logger = logging.getLogger("cctv_audit.gcp")
 _client: Optional[genai.Client] = None
 
 
-class GCloudCredentials(BaseCredentials):
-    """Credentials backed by the gcloud CLI, falling back to ADC."""
+# Vertex, Storage and Firestore all sit under this one scope. Asking for it by
+# name matters on a workstation, where ADC may have been minted for something
+# narrower; on a metadata-server identity it is what you get anyway.
+_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
 
-    def __init__(self):
-        super().__init__()
-        self.token = None
-        self.refresh(None)
 
-    def refresh(self, request=None):
-        try:
-            self.token = subprocess.check_output(
-                ["gcloud", "auth", "print-access-token"], stderr=subprocess.DEVNULL
-            ).decode().strip()
-        except Exception as exc:
-            logger.info("gcloud print-access-token failed (%s); falling back to ADC.", exc)
-            creds, _ = google.auth.default()
-            creds.refresh(request or google.auth.transport.requests.Request())
-            self.token = creds.token
+# There used to be a `GCloudCredentials` class here that shelled out to
+# `gcloud auth print-access-token` and fell back to ADC. It is gone, and the
+# reason is worth keeping:
+#
+# It subclassed `Credentials` but never set `self.expiry`. In google-auth,
+# `expired` is False whenever `expiry` is None and `valid` is `token is not
+# None and not expired` -- so the object reported itself valid forever and
+# `before_request` never called `refresh()`. The access token minted when the
+# container booted was reused until the process died. Google access tokens
+# last an hour.
+#
+# What that looked like from outside, on 2026-09-04: an audit ran 22 windows
+# clean and then 401'd on windows 23 through 32, and the job still finished and
+# filed a report -- for a video it had stopped watching. A GE turn 50 minutes
+# after the container started came back "I can't read that, say it again",
+# because the intent call had 401'd and the honest-sounding fallback message
+# hid an auth failure behind a comprehension failure.
+#
+# Nothing here needs hand-rolled credentials. ADC already refreshes itself.
+def credentials_without_quota_project():
+    """ADC with the billing/quota project stripped off.
+
+    Agent Runtime hands the container credentials that already carry a quota
+    project -- the project *number*. Any client built on them sends
+    `x-goog-user-project`, and Cloud Storage reads that as "bill this project",
+    which needs `serviceusage.services.use`. An agent service account granted
+    exactly the roles it uses does not have that, so every GCS read came back:
+
+        403 GET .../sop%2Fchagee-store-v1.yaml?alt=media:
+        cctv-audit-agent@... does not have serviceusage.services.use access to
+        the Google Cloud project.
+
+    Note whose name is in that message: the storage role was never the problem,
+    and the bucket policy looked correct the whole time. Firestore is not
+    affected -- same credentials, same run, it read fine -- which is why only
+    the SOP fetch broke.
+
+    Granting `roles/serviceusage.serviceUsageConsumer` would also fix it. We do
+    not, because the bucket is in the same project we would be billing: there
+    is nothing to charge elsewhere, so the header has no purpose here, and
+    dropping it keeps one more role off the customer's deployment checklist.
+
+    Returns None if ADC cannot be resolved at all, which lets the caller fall
+    back to the library default and fail with its own clearer message.
+    """
+    try:
+        creds, _ = google.auth.default(scopes=list(_SCOPES))
+    except Exception as exc:  # no ADC -- local runs without gcloud, tests
+        logger.info("no ADC available (%s); leaving credentials to the client.", exc)
+        return None
+    strip = getattr(creds, "with_quota_project", None)
+    return strip(None) if strip else creds
+
+
+# ID tokens are good for an hour. Refreshing a few minutes early costs one
+# extra mint per audit and removes the case where a token issued at the top of
+# a long capture expires halfway through it.
+_ID_TOKEN_TTL_SECONDS = 3000.0
+_id_tokens: dict[str, tuple[float, str]] = {}
+
+
+def origin_of(url: str) -> str:
+    """`scheme://host[:port]`, lowercased, or "" if there is no host."""
+    parts = urlsplit(url or "")
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}" if parts.netloc else ""
+
+
+def is_oidc_origin(url: str) -> bool:
+    """True if `url` lives on an origin the operator marked as IAM-protected."""
+    return origin_of(url) in set(config.oidc_origins)
+
+
+def id_token_for(url: str, *, now: Optional[float] = None) -> Optional[str]:
+    """A Google ID token audienced at `url`'s origin, or None if not needed.
+
+    Returns None -- rather than raising -- for an origin that is not on the
+    list, because that is the overwhelmingly common case: every ordinary CCTV
+    console and every public video site goes down this path, and none of them
+    should see a token.
+
+    Minting *does* raise if the origin is on the list and no identity can be
+    obtained. That is deliberate: the operator has said this origin needs a
+    token, so continuing without one produces a 403 whose cause is three
+    layers away from the message.
+    """
+    origin = origin_of(url)
+    if origin not in set(config.oidc_origins):
+        return None
+
+    now = time.monotonic() if now is None else now
+    cached = _id_tokens.get(origin)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    from google.oauth2 import id_token as google_id_token
+
+    # `fetch_id_token` uses ADC: on Agent Runtime and Cloud Run that is the
+    # service account's metadata-server identity, which is what the receiving
+    # service checks against its `run.invoker` binding.
+    token = google_id_token.fetch_id_token(
+        google.auth.transport.requests.Request(), origin
+    )
+    _id_tokens[origin] = (now + _ID_TOKEN_TTL_SECONDS, token)
+    logger.info("Minted a Google ID token for %s.", origin)
+    return token
+
+
+def reset_id_token_cache() -> None:
+    """Drops every cached ID token. For tests and for a fresh audit run."""
+    _id_tokens.clear()
 
 
 def get_genai_client() -> genai.Client:
@@ -64,11 +162,15 @@ def get_genai_client() -> genai.Client:
     if _client is None:
         if not config.gcp_project:
             raise RuntimeError("GOOGLE_CLOUD_PROJECT is not set; cannot reach Vertex AI.")
+        # `credentials=None` would let google-genai resolve ADC itself, which
+        # is almost right -- but it would keep the quota project, and on Agent
+        # Runtime that is the project *number* in an `x-goog-user-project`
+        # header the agent service account is not allowed to bill to.
         _client = genai.Client(
             vertexai=True,
             project=config.gcp_project,
             location=config.gcp_location,
-            credentials=GCloudCredentials(),
+            credentials=credentials_without_quota_project(),
         )
         logger.info("Vertex AI client ready (project=%s, location=%s).",
                     config.gcp_project, config.gcp_location)

@@ -31,6 +31,7 @@ import argparse
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
@@ -39,29 +40,98 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import config
+from .logsetup import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Was a bare `basicConfig` to stderr. Same intent, but shared with the agent
+# container so both halves of one image log the same way -- and on stdout, so
+# Cloud Run stops filing every INFO line as an error.
+setup_logging()
 logger = logging.getLogger("cctv_audit.monitor_server")
 
 app = FastAPI(title="CCTV Audit Live Monitor")
 
-state: Dict[str, Any] = {
-    "status": "IDLE",
-    "prompt": "",
-    "capture_settings": "",
-    "current_url": "about:blank",
-    "last_action": "",
-    "last_action_args": {},
-    "click_target": None,
-    "latest_frame_b64": None,
-    "timeline": [],
-    "final_result": "",
-    "video_segments": [],
-    "sop_violations": [],
-    "intervention": None,
-}
 
-active_websockets: Set[WebSocket] = set()
+def _blank_state() -> Dict[str, Any]:
+    return {
+        "status": "IDLE",
+        "prompt": "",
+        "capture_settings": "",
+        "current_url": "about:blank",
+        "last_action": "",
+        "last_action_args": {},
+        "click_target": None,
+        "latest_frame_b64": None,
+        "timeline": [],
+        "final_result": "",
+        "video_segments": [],
+        "sop_violations": [],
+        "intervention": None,
+    }
+
+
+class Room:
+    """One audit's picture and the people watching it.
+
+    Rooms exist because this is a single service that several audits share.
+    Frames arrive at `/api/event` from the container running the audit and
+    leave over the WebSockets of whoever opened that audit's link; with one
+    global state dict, two audits running at once overwrite each other's
+    picture and every viewer sees whichever frame landed last.
+
+    The empty key is the local case -- `adk web`, one audit, one dashboard,
+    nobody passing a job id -- and behaves exactly as the whole server did
+    before rooms existed.
+    """
+
+    __slots__ = ("job_id", "state", "sockets", "touched")
+
+    def __init__(self, job_id: str):
+        self.job_id = job_id
+        self.state = _blank_state()
+        self.sockets: Set[WebSocket] = set()
+        self.touched = time.time()
+
+
+# Enough for far more concurrent audits than one instance can actually run,
+# small enough that a stream of unknown job ids cannot grow this without
+# bound -- `/api/event` is authenticated, but a bug upstream that stamped a
+# fresh id on every frame would otherwise be a slow memory leak.
+_MAX_ROOMS = 64
+
+_rooms: Dict[str, Room] = {"": Room("")}
+
+# The local room, and the one every pre-rooms caller still lands in.
+state: Dict[str, Any] = _rooms[""].state
+active_websockets: Set[WebSocket] = _rooms[""].sockets
+
+
+def _room(job_id: Optional[str], *, create: bool = True) -> Room:
+    key = (job_id or "").strip()
+    room = _rooms.get(key)
+    if room is None:
+        if not create:
+            return _rooms[""]
+        _evict_rooms()
+        room = _rooms[key] = Room(key)
+        logger.info("Dashboard room opened for job %s (%d open)", key, len(_rooms))
+    room.touched = time.time()
+    return room
+
+
+def _evict_rooms() -> None:
+    """Drops the least recently touched empty rooms once there are too many.
+
+    Only rooms nobody is watching, and never the local one: an audit whose
+    viewer walked away still has frames coming, and evicting it mid-run would
+    show the next person to open the link a dashboard that had never started.
+    """
+    while len(_rooms) >= _MAX_ROOMS:
+        idle = [r for r in _rooms.values() if r.job_id and not r.sockets]
+        if not idle:
+            return
+        oldest = min(idle, key=lambda r: r.touched)
+        _rooms.pop(oldest.job_id, None)
+        logger.info("Dashboard room %s evicted (idle, %d rooms)", oldest.job_id, len(_rooms))
 
 # Set by the pipeline process when it runs in-process with the server, so the
 # "continue" button can release the gate directly.
@@ -154,17 +224,24 @@ def _check_token(request: Request) -> None:
         raise HTTPException(status_code=401, detail="invalid or missing monitor token")
 
 
-async def _broadcast(payload: Dict[str, Any]) -> None:
-    if not active_websockets:
+async def _broadcast(room: Room, payload: Dict[str, Any]) -> None:
+    """Sends to this room only.
+
+    Not "this room plus everyone else, just in case" -- a live CCTV frame is
+    footage of identifiable staff and customers, and the room is who is
+    entitled to see it. A fan-out that treats frames as a special case worth
+    delivering everywhere is how two audits end up cross-streaming.
+    """
+    if not room.sockets:
         return
     message = json.dumps(payload, ensure_ascii=False)
     dead = set()
-    for websocket in list(active_websockets):
+    for websocket in list(room.sockets):
         try:
             await websocket.send_text(message)
         except Exception:
             dead.add(websocket)
-    active_websockets.difference_update(dead)
+    room.sockets.difference_update(dead)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -174,8 +251,9 @@ async def dashboard():
 
 
 @app.get("/api/state")
-async def get_state():
-    return {k: v for k, v in state.items() if k != "latest_frame_b64"}
+async def get_state(job: str = ""):
+    room = _room(job, create=False)
+    return {k: v for k, v in room.state.items() if k != "latest_frame_b64"}
 
 
 @app.get("/api/evidence/{path:path}")
@@ -192,6 +270,25 @@ async def get_evidence(path: str):
     return FileResponse(candidate)
 
 
+@app.get("/api/viewers")
+async def get_viewers(request: Request, job: str = ""):
+    """How many people have *this audit's* page open.
+
+    The audit asks before it streams anything: preview frames are the only
+    high-rate traffic in the system (every viewer is a separate stream), and
+    most audits run with nobody watching. Answering 0 turns that bandwidth off
+    entirely.
+
+    Scoped to the room, because the alternative is that someone watching a
+    different audit keeps this one streaming frames to nobody.
+
+    Token-checked like the rest: the count says whether an audit is being
+    observed right now, which is not a stranger's business.
+    """
+    _check_token(request)
+    return {"viewers": len(_room(job, create=False).sockets)}
+
+
 @app.post("/api/event")
 async def post_event(request: Request):
     _check_token(request)
@@ -201,22 +298,24 @@ async def post_event(request: Request):
         return JSONResponse({"error": "invalid json"}, status_code=400)
 
     event_type = payload.get("type")
+    room = _room(payload.get("job_id"))
+    room_state = room.state
 
     if event_type == "state":
-        state.update(payload.get("data", {}))
+        room_state.update(payload.get("data", {}))
     elif event_type == "frame":
-        state["latest_frame_b64"] = payload.get("frame")
+        room_state["latest_frame_b64"] = payload.get("frame")
         if payload.get("url"):
-            state["current_url"] = payload["url"]
+            room_state["current_url"] = payload["url"]
     elif event_type == "action":
         action = payload.get("action", {})
-        state["last_action"] = action.get("action", "")
-        state["last_action_args"] = action.get("args", {})
-        state["click_target"] = payload.get("click_target")
+        room_state["last_action"] = action.get("action", "")
+        room_state["last_action_args"] = action.get("args", {})
+        room_state["click_target"] = payload.get("click_target")
         if action.get("url"):
-            state["current_url"] = action["url"]
+            room_state["current_url"] = action["url"]
         if action:
-            state["timeline"] = (state["timeline"] + [action])[-50:]
+            room_state["timeline"] = (room_state["timeline"] + [action])[-50:]
     elif event_type == "segment":
         segment = payload.get("segment") or {}
         if segment:
@@ -224,30 +323,30 @@ async def post_event(request: Request):
             # AuditStore already persisted this record before it was pushed.
             key = segment.get("id")
             existing = next(
-                (s for s in state["video_segments"]
+                (s for s in room_state["video_segments"]
                  if (key is not None and s.get("id") == key)
                  or (key is None and s.get("time_range") == segment.get("time_range"))),
                 None,
             )
             if existing is None:
-                state["video_segments"].append(segment)
+                room_state["video_segments"].append(segment)
                 if segment.get("sop_status") == "VIOLATION":
-                    state["sop_violations"].append(segment)
+                    room_state["sop_violations"].append(segment)
                 # Windows arrive in completion order, not video order: with
                 # ANALYSIS_CONCURRENCY > 1 window 2 routinely lands before
                 # window 1. Insert-sort here so the sidebar always reads as a
                 # timeline, and late arrivals slot into place instead of
                 # appending to the bottom.
                 for key in ("video_segments", "sop_violations"):
-                    state[key].sort(key=_segment_order)
+                    room_state[key].sort(key=_segment_order)
             else:
                 existing.update(segment)
     elif event_type == "intervention":
-        state["intervention"] = payload.get("reason")
+        room_state["intervention"] = payload.get("reason")
     elif event_type == "intervention_cleared":
-        state["intervention"] = None
+        room_state["intervention"] = None
 
-    await _broadcast(payload)
+    await _broadcast(room, payload)
     return {"status": "ok"}
 
 
@@ -269,7 +368,8 @@ async def post_interact(request: Request):
     if action != "resolve":
         return JSONResponse({"error": f"unsupported action '{action}'"}, status_code=400)
 
-    state["intervention"] = None
+    room = _room(payload.get("job_id"), create=False)
+    room.state["intervention"] = None
     if _human_gate is not None:
         _human_gate.resolve()
         logger.info("Operator cleared the intervention gate.")
@@ -278,28 +378,34 @@ async def post_interact(request: Request):
         # in-process gate to poke. Clearing `state["intervention"]` above is the
         # signal -- HumanGate polls /api/state and resumes when the banner goes.
         logger.info("Intervention cleared; the pipeline will pick it up from /api/state.")
-    await _broadcast({"type": "intervention_cleared"})
+    await _broadcast(room, {"type": "intervention_cleared"})
     return {"status": "ok", "gate_attached": _human_gate is not None}
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, job: str = ""):
     await websocket.accept()
-    active_websockets.add(websocket)
+    # Created on join, not only on the first frame: the link goes out to the
+    # customer the moment preflight returns, so people routinely open the page
+    # before the audit they were sent has posted anything.
+    room = _room(job)
+    room.sockets.add(websocket)
+    room_state = room.state
     try:
         await websocket.send_text(json.dumps(
-            {"type": "state", "data": {k: v for k, v in state.items() if k != "latest_frame_b64"}},
+            {"type": "state",
+             "data": {k: v for k, v in room_state.items() if k != "latest_frame_b64"}},
             ensure_ascii=False,
         ))
-        if state.get("latest_frame_b64"):
+        if room_state.get("latest_frame_b64"):
             await websocket.send_text(json.dumps({
                 "type": "frame",
-                "frame": state["latest_frame_b64"],
-                "url": state["current_url"],
+                "frame": room_state["latest_frame_b64"],
+                "url": room_state["current_url"],
             }))
-        if state.get("intervention"):
+        if room_state.get("intervention"):
             await websocket.send_text(json.dumps(
-                {"type": "intervention", "reason": state["intervention"]}, ensure_ascii=False))
+                {"type": "intervention", "reason": room_state["intervention"]}, ensure_ascii=False))
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
@@ -307,7 +413,8 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as exc:
         logger.debug("WebSocket closed: %s", exc)
     finally:
-        active_websockets.discard(websocket)
+        room.sockets.discard(websocket)
+        room.touched = time.time()
 
 
 def main():

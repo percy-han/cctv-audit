@@ -29,7 +29,7 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.genai import types
 
-from .analyzer import load_rules
+from .analyzer import SopRuleSet, SopUnavailable, load_rules_for
 from .capture.types import Clip
 from .config import config  # noqa: F401  -- imported for its .env / SSL side effects
 from .intent import (  # noqa: F401  -- parse_request re-exported for the tests
@@ -158,15 +158,30 @@ class CctvAuditAgent(BaseAgent):
             yield self._say(ctx, "⚠️ 配置有误，无法启动：\n" + "\n".join(f"  • {p}" for p in problems))
             return
 
+        # Resolved once, here, and handed to everything below. Letting the store
+        # and the pipeline each load their own would let this path quietly read
+        # the on-disk YAML while the cloud path errors on a missing version --
+        # two entrances judging the same footage by two standards, and nothing
+        # on screen to say so.
+        try:
+            rules = await load_rules_for()
+        except SopUnavailable as exc:
+            yield self._say(ctx, (
+                f"⚠️ 取不到稽核标准，**没有开跑**：{exc}\n"
+                "没有标准就没有判定依据，回落到别的版本会让结论对不上账，所以直接停下来。"
+            ))
+            return
+
         # The monitor server usually runs as a separate process (start_web.sh),
         # so the gate reads its state over HTTP rather than relying on an
         # in-process callback that would not exist there.
         gate = HumanGate(notify=monitor.request_human, read_intervention=monitor.read_intervention)
-        store = AuditStore(on_record=monitor.push_record)
+        store = AuditStore(rules=rules, on_record=monitor.push_record)
         events: asyncio.Queue = asyncio.Queue()
 
         pipeline = AuditPipeline(
             store=store,
+            rules=rules,
             gate=gate,
             on_preview_frame=monitor.update_frame_b64,
             on_status=lambda event, payload: events.put_nowait((event, payload)),
@@ -181,7 +196,7 @@ class CctvAuditAgent(BaseAgent):
                       f"{config.window_overlap_seconds:g}s / 抽帧 "
                       f"{config.analysis_fps:g} FPS / 画质 {config.media_resolution}"),
         )
-        yield self._say(ctx, self._start_banner(intent))
+        yield self._say(ctx, self._start_banner(intent, rules))
 
         task = asyncio.create_task(pipeline.run(request))
         try:
@@ -235,7 +250,7 @@ class CctvAuditAgent(BaseAgent):
         )
 
     @staticmethod
-    def _start_banner(intent: Intent) -> str:
+    def _start_banner(intent: Intent, rules: SopRuleSet) -> str:
         request = intent.request
         # Spelled out as timeline marks, not as "0s + 240s". This line is the
         # only chance to catch a misread request before the run bills for it.
@@ -259,13 +274,14 @@ class CctvAuditAgent(BaseAgent):
             note = ""
         # Naming the rules up front is the cheapest way to catch the mistake of
         # pasting a standard into the chat box and assuming it took effect.
-        rules = load_rules()
+        # `origin` and not the configured path: once the standard comes from a
+        # bucket, the filename setting is no longer what is in force.
         return (
             f"🎬 开始稽核 `{request.target}`（{span}）{note}\n\n"
             f"窗口 {config.window_seconds}s / 重叠 {config.window_overlap_seconds}s，"
             f"抽帧 {config.analysis_fps} FPS，画质档 {config.media_resolution}，"
             f"并发 {config.analysis_concurrency}。\n"
-            f"稽核标准：`{config.sop_rules_path.name}` v{rules.version} 共 {len(rules.rules)} 条"
+            f"稽核标准：`{rules.origin}` v{rules.version} 共 {len(rules.rules)} 条"
             f"（{', '.join(rules.ids)}）\n"
             f"实时画面与逐条判定请看监控大屏：http://127.0.0.1:{config.monitor_port}/"
         )

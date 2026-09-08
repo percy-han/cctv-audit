@@ -119,6 +119,15 @@ CLASS_METHODS = [
         },
     },
     {
+        "name": "jobs",
+        "api_mode": "",
+        "description": (
+            "Reads the background job table. The readout for the "
+            "'does a detached task outlive the 900s request cancel' probe."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
         "name": "probe_log",
         "api_mode": "",
         "description": (

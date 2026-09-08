@@ -317,9 +317,27 @@ class BilibiliNavigator:
         the footage. Dismissing once at open_target is not enough, so the
         pipeline calls this on a timer. Real CCTV platforms do the same thing
         with session-expiry prompts.
+
+        Closing the modal is only half of it, because bilibili *pauses* the
+        video when it raises one. Measured (job 692b53): the nag appeared about
+        70 seconds in, the player stopped, and Chromium -- which only emits a
+        screencast frame on repaint -- delivered 0 fps for the remaining two
+        minutes while the dashboard happily forwarded the same still. So
+        whatever we just closed, put the player back in motion before leaving.
+        Conditional on having actually closed something: calling `play()` on
+        every poll would override a human working the gate.
         """
-        await self._dismiss_overlays(page)
+        closed = await self._dismiss_overlays(page)
         await self._disable_danmaku(page)
+        if not closed:
+            return
+        try:
+            await self.ensure_playing(page)
+        except Exception as exc:
+            # The caller polls; there will be another chance in a few seconds.
+            # Raising here would skip the rest of its housekeeping instead.
+            logger.warning("Dismissed %d overlay(s) but could not resume "
+                           "playback: %s", closed, exc)
 
     async def read_duration(self, page) -> Optional[float]:
         try:
@@ -383,14 +401,24 @@ class BilibiliNavigator:
         ".bili-header__banner",
     )
 
-    async def _dismiss_overlays(self, page) -> None:
-        """Closes the login nag and cookie banners that cover the player."""
+    async def _dismiss_overlays(self, page) -> int:
+        """Closes the login nag and cookie banners that cover the player.
+
+        Returns how many things it actually got rid of, and says so at INFO
+        rather than DEBUG. That is not tidying: DEBUG does not reach Cloud
+        Logging, so on the run where the picture froze (job 692b53) there was
+        no way to tell "we never saw the modal" from "we closed it and the
+        player stayed paused anyway" -- two different bugs with two different
+        fixes. The count is the difference.
+        """
+        closed = 0
         for selector in self._OVERLAY_CLOSERS:
             try:
                 locator = page.locator(selector).first
                 if await locator.count() and await locator.is_visible(timeout=500):
                     await locator.click(timeout=2000)
-                    logger.debug("Dismissed overlay %s", selector)
+                    closed += 1
+                    logger.info("Dismissed overlay %s", selector)
             except Exception:
                 continue
         try:
@@ -407,9 +435,11 @@ class BilibiliNavigator:
                 list(self._OVERLAY_HIDE),
             )
             if hidden:
-                logger.debug("Hid %d stubborn overlay element(s)", hidden)
+                closed += hidden
+                logger.info("Hid %d stubborn overlay element(s)", hidden)
         except Exception as exc:
             logger.debug("Could not hide overlays: %s", exc)
+        return closed
 
     async def _disable_danmaku(self, page) -> None:
         """Turns off bullet comments.

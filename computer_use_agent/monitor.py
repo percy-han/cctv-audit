@@ -32,9 +32,13 @@ HTML_PAGE = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CHAGEE CCTV 门店视频智能稽核监控台</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=PingFang+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- No webfont. There used to be a render-blocking Google Fonts request
+       here for JetBrains Mono + PingFang SC; measured, it returned only
+       JetBrains Mono, because PingFang SC is an Apple system font that Google
+       Fonts does not carry and silently drops. So the first paint of a
+       dashboard someone is waiting on was held hostage to a third-party
+       round trip for a font that was already installed locally on the only
+       machines that have it. Every rule below already names a local stack. -->
   <style>
     :root {
       --bg-main: #0b0f19;
@@ -125,7 +129,7 @@ HTML_PAGE = """<!DOCTYPE html>
       border: 1px solid var(--border);
       padding: 6px 12px;
       border-radius: 6px;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
       font-size: 0.8rem;
       color: var(--accent);
       white-space: nowrap;
@@ -158,7 +162,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
     .meta-val {
       color: var(--text-bright);
-      font-family: 'JetBrains Mono', monospace;
+      font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
       font-weight: 600;
     }
     .badge-seg {
@@ -201,11 +205,15 @@ HTML_PAGE = """<!DOCTYPE html>
       overflow: hidden;
       background-size: cover;
     }
+    /* Fill the panel, letterboxing to keep the aspect ratio. The previous
+       rule was `width:auto; height:auto; max-*:100%`, which only ever shrinks
+       -- a 640x360 preview frame sat as a small rectangle in the middle of a
+       1080p wall while the 1920x1080 placeholder SVG next to it filled the
+       panel, so the picture appeared to get *smaller* the moment the audit
+       started. Upscaling a preview frame is the whole point of a preview. */
     #browser-screen {
-      max-width: 100%;
-      max-height: 100%;
-      width: auto;
-      height: auto;
+      width: 100%;
+      height: 100%;
       object-fit: contain;
       box-shadow: 0 0 20px rgba(0,0,0,0.8);
       user-select: none;
@@ -256,7 +264,7 @@ HTML_PAGE = """<!DOCTYPE html>
       padding: 2px 6px;
       border-radius: 4px;
       white-space: nowrap;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
     }
     @keyframes radar-ripple {
       0% { transform: scale(0.3); opacity: 1; }
@@ -288,7 +296,7 @@ HTML_PAGE = """<!DOCTYPE html>
     .hud-action-tag {
       background: var(--accent-purple);
       color: #fff;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
       font-size: 0.78rem;
       font-weight: 700;
       padding: 4px 8px;
@@ -419,7 +427,7 @@ HTML_PAGE = """<!DOCTYPE html>
       border: 1px solid rgba(56, 189, 248, 0.3);
       padding: 2px 8px;
       border-radius: 4px;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
       font-weight: 700;
       font-size: 0.85rem;
     }
@@ -553,7 +561,7 @@ HTML_PAGE = """<!DOCTYPE html>
       margin-bottom: 4px;
     }
     .step-action-name {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
       font-size: 0.82rem;
       font-weight: 700;
       color: var(--accent);
@@ -561,7 +569,7 @@ HTML_PAGE = """<!DOCTYPE html>
     .step-time {
       font-size: 0.72rem;
       color: var(--text-muted);
-      font-family: 'JetBrains Mono', monospace;
+      font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
     }
     .step-intent {
       font-size: 0.8rem;
@@ -571,7 +579,7 @@ HTML_PAGE = """<!DOCTYPE html>
     .step-url {
       font-size: 0.72rem;
       color: var(--text-muted);
-      font-family: 'JetBrains Mono', monospace;
+      font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -762,9 +770,16 @@ HTML_PAGE = """<!DOCTYPE html>
       });
     }
 
+    // Which audit this page is watching. The link handed back by preflight is
+    // `.../?job=<job_id>`; without one we join the shared room, which is the
+    // local `adk web` case. Everything the page asks for is scoped by this --
+    // otherwise two people watching two audits see each other's footage.
+    const JOB_ID = new URLSearchParams(window.location.search).get('job') || '';
+    const JOB_QUERY = JOB_ID ? `?job=${encodeURIComponent(JOB_ID)}` : '';
+
     function connectWS() {
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${proto}//${window.location.host}/ws`;
+      const wsUrl = `${proto}//${window.location.host}/ws${JOB_QUERY}`;
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
@@ -824,7 +839,7 @@ HTML_PAGE = """<!DOCTYPE html>
         await fetch('/api/interact', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'resolve' }),
+          body: JSON.stringify({ action: 'resolve', job_id: JOB_ID }),
         });
         hideIntervention();
       } catch (e) {
@@ -1060,7 +1075,7 @@ HTML_PAGE = """<!DOCTYPE html>
       }, 2500);
     }
 
-    fetch('/api/state').then(r => r.json()).then(s => updateState(s)).catch(() => {});
+    fetch('/api/state' + JOB_QUERY).then(r => r.json()).then(s => updateState(s)).catch(() => {});
     connectWS();
   </script>
 </body>
@@ -1068,21 +1083,71 @@ HTML_PAGE = """<!DOCTYPE html>
 """
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name) or default)
+    except ValueError:
+        logger.warning("%s is not a whole number; using %s.", name, default)
+        return default
+
+
+# How many preview frames may be on the wire at once. Sized to cover the round
+# trip to a Cloud Run dashboard (a few hundred ms) at 12 fps without letting a
+# genuinely stalled link accumulate a backlog. See `update_frame_b64`.
+#
+# Tunable by environment because changing it is the one cheap experiment for a
+# slideshow dashboard, and a rebuild to try a different number costs ten
+# minutes while an engine env update costs one.
+_MAX_FRAMES_IN_FLIGHT = _env_int("MAX_FRAMES_IN_FLIGHT", 4)
+
+# How often the sender says out loud what it is doing to the preview stream.
+#
+# The dashboard has been reported as a slideshow twice, and both investigations
+# stalled at the same place: PREVIEW_FPS says 12, the viewer counts 1, and
+# nothing in between is observable. Dropping frames is the *designed* behaviour
+# of the cap above, so it is silent by construction -- the counter it bumps was
+# only ever read in tests. This makes the drop rate and the round trip visible
+# from a log, which is the difference between measuring the problem and
+# guessing at it again.
+_FRAME_REPORT_SECONDS = 15.0
+
+
 class BrowserMonitorClient:
     """Sends browser use frames, action events, and video segment audit results to the monitor server."""
 
-    def __init__(self):
+    def __init__(self, job_id: str = ""):
         from .config import config as _config
 
+        # Which dashboard room this client writes to. Empty is the shared room
+        # -- `adk web`, where there is one audit and one page. In the cloud
+        # every audit gets its own, so that two customers watching two audits
+        # on the same service do not see each other's CCTV footage.
+        self.job_id = job_id
         self.port = _config.monitor_port
         self.token = _config.monitor_token
+        # One place that decides where the dashboard is. Locally it is the
+        # other process on this box; on Agent Runtime it is a Cloud Run service
+        # and 127.0.0.1 would post frames into the void -- silently, because
+        # every send here is fire-and-forget by design.
+        self.base_url = _config.monitor_url or f"http://127.0.0.1:{_config.monitor_port}"
+        self._id_token = ""
+        self._id_token_expiry = 0.0
+        self._id_token_warned = False
         self.screen_width = _config.screen_width
         self.screen_height = _config.screen_height
         self._session: Optional[aiohttp.ClientSession] = None
         self._segments: List[Dict[str, Any]] = []
         # Frames are the only high-rate event, and the only one worth dropping.
-        self._frame_in_flight = False
+        self._frames_in_flight = 0
         self._frames_dropped = 0
+        # Everything below is for the periodic report in `_frame_report`. Kept
+        # on the client rather than in a global so two audits in one container
+        # do not average each other's numbers together.
+        self._frames_offered = 0
+        self._frames_sent = 0
+        self._frame_bytes = 0
+        self._send_ms: List[float] = []
+        self._report_at = 0.0
 
     @property
     def state(self) -> Dict[str, Any]:
@@ -1103,6 +1168,63 @@ class BrowserMonitorClient:
             )
         return self._session
 
+    async def _headers(self) -> Dict[str, str]:
+        """What every call to the dashboard carries.
+
+        Two different things, and both are needed once the dashboard is a
+        separate Cloud Run service:
+
+          * `X-Monitor-Token` is the application's own shared secret. It is
+            what `monitor_server` checks, and it is all that is needed when the
+            two run on one box.
+          * `Authorization` is a Google-issued identity token. The dashboard is
+            deployed `--no-allow-unauthenticated` -- the org policy forbids
+            `allUsers` anyway -- so Cloud Run rejects the request before
+            `monitor_server` ever sees it unless one is attached.
+
+        Fetching the identity token needs a service account, which is what runs
+        in the cloud and is exactly what a workstation's user credentials are
+        not. So a failure here is logged once and shrugged off: locally there
+        is nothing in front of the dashboard to satisfy.
+        """
+        headers = {"X-Monitor-Token": self.token} if self.token else {}
+        if not self.base_url.startswith("https://"):
+            return headers
+
+        token = await self._identity_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    async def _identity_token(self) -> str:
+        """An OIDC token for the dashboard's URL, refreshed a minute early."""
+        if self._id_token and time.time() < self._id_token_expiry - 60:
+            return self._id_token
+
+        def fetch() -> tuple:
+            import google.auth.transport.requests
+            from google.oauth2 import id_token as id_token_lib
+
+            request = google.auth.transport.requests.Request()
+            raw = id_token_lib.fetch_id_token(request, self.base_url)
+            # The expiry is inside the token; decoding it would mean pulling in
+            # a JWT library for one number. Google's are an hour, so re-fetch
+            # every fifty minutes and let the metadata server cache it.
+            return raw, time.time() + 3000
+
+        try:
+            self._id_token, self._id_token_expiry = await asyncio.to_thread(fetch)
+        except Exception as exc:
+            if not self._id_token_warned:
+                self._id_token_warned = True
+                logger.warning(
+                    "No identity token for %s (%s). Dashboard updates will be "
+                    "rejected if it requires authentication.",
+                    self.base_url, str(exc)[:120],
+                )
+            return ""
+        return self._id_token
+
     def _fire_and_forget(self, payload: Dict[str, Any], on_done=None):
         try:
             loop = asyncio.get_running_loop()
@@ -1119,9 +1241,15 @@ class BrowserMonitorClient:
     async def _post_event(self, payload: Dict[str, Any]):
         try:
             session = await self._get_session()
-            headers = {"X-Monitor-Token": self.token} if self.token else {}
+            headers = await self._headers()
+            # Stamped here rather than at every call site: forgetting it on one
+            # event type would put that event in the wrong room, and the
+            # symptom -- a card appearing on somebody else's dashboard -- is
+            # not one anybody would connect back to a missing field.
+            if self.job_id:
+                payload = {**payload, "job_id": self.job_id}
             async with session.post(
-                f"http://127.0.0.1:{self.port}/api/event", json=payload, headers=headers
+                f"{self.base_url}/api/event", json=payload, headers=headers
             ):
                 pass
         except Exception:
@@ -1192,9 +1320,9 @@ class BrowserMonitorClient:
         """
         try:
             session = await self._get_session()
-            headers = {"X-Monitor-Token": self.token} if self.token else {}
+            headers = await self._headers()
             async with session.get(
-                f"http://127.0.0.1:{self.port}/api/state", headers=headers
+                f"{self.base_url}/api/state", params=self._job_params(), headers=headers
             ) as response:
                 if response.status != 200:
                     return False, None
@@ -1202,6 +1330,35 @@ class BrowserMonitorClient:
             return True, data.get("intervention")
         except Exception:
             return False, None
+
+    async def viewers(self) -> int:
+        """How many people currently have the dashboard open.
+
+        Used to decide whether streaming preview frames is worth anything.
+        Returns 0 when the dashboard cannot be reached, which is the same
+        answer as "nobody is watching" and leads to the same behaviour: send
+        nothing. Erring the other way would stream a live CCTV feed at a
+        service that is not there.
+        """
+        try:
+            session = await self._get_session()
+            headers = await self._headers()
+            async with session.get(
+                f"{self.base_url}/api/viewers", params=self._job_params(), headers=headers
+            ) as response:
+                if response.status != 200:
+                    return 0
+                return int((await response.json()).get("viewers") or 0)
+        except Exception:
+            return 0
+
+    def _job_params(self) -> Dict[str, str]:
+        """Scopes a read to this audit's room.
+
+        Without it a run streams frames for as long as *anyone* has *any*
+        dashboard open, which is both the wrong answer and an expensive one.
+        """
+        return {"job": self.job_id} if self.job_id else {}
 
     def note(self, action: str, detail: str = "") -> None:
         """Says what the run is doing, in the dashboard's action banner."""
@@ -1211,22 +1368,84 @@ class BrowserMonitorClient:
         })
 
     def update_frame_b64(self, b64_str: str):
-        """Pushes a preview frame, skipping it if the last one is still going.
+        """Pushes a preview frame, dropping it if too many are already going.
 
-        Without this, a slow link (an SSH tunnel back to a laptop is the normal
-        case here) turns a 15 fps preview into an unbounded pile of pending
-        POST tasks that arrive late, in bursts, and out of order -- which looks
-        worse on the dashboard than simply showing fewer frames. A dropped
-        preview frame costs nothing: the evidence feed is a separate stream.
+        There has to be a cap: without one, a slow link turns a 12 fps preview
+        into an unbounded pile of pending POST tasks that arrive late, in
+        bursts, and out of order -- which looks worse on the dashboard than
+        simply showing fewer frames. A dropped preview frame costs nothing; the
+        evidence feed is a separate stream.
+
+        The cap used to be one, and that quietly made the round trip the frame
+        rate: the dashboard is a Cloud Run service several hundred milliseconds
+        away, so 12 fps arrived as **0.5 fps** in a measured run -- a
+        slideshow, whatever `PREVIEW_FPS` says. Nothing logged it, because
+        dropping frames is the designed behaviour and the counter it increments
+        is only read in tests.
+
+        A few in flight covers the round trip without reintroducing the pile.
+        Frames can now land out of order, which at 12 fps means the picture can
+        be one frame stale for ~80ms. That is not visible; a slideshow is.
         """
-        if self._frame_in_flight:
+        self._frames_offered += 1
+        if self._report_at == 0.0:
+            self._report_at = time.monotonic()
+        if self._frames_in_flight >= _MAX_FRAMES_IN_FLIGHT:
             self._frames_dropped += 1
+            self._frame_report()
             return
-        self._frame_in_flight = True
-        self._fire_and_forget({"type": "frame", "frame": b64_str}, on_done=self._frame_sent)
+        self._frames_in_flight += 1
+        started = time.monotonic()
+        self._fire_and_forget(
+            {"type": "frame", "frame": b64_str},
+            on_done=lambda: self._frame_sent(started, len(b64_str)),
+        )
 
-    def _frame_sent(self) -> None:
-        self._frame_in_flight = False
+    def _frame_sent(self, started: float = 0.0, size: int = 0) -> None:
+        # Never below zero: `_fire_and_forget` calls this synchronously when
+        # there is no event loop, and a counter that drifts negative would
+        # uncap the sender instead of capping it.
+        self._frames_in_flight = max(0, self._frames_in_flight - 1)
+        self._frames_sent += 1
+        self._frame_bytes += size
+        if started:
+            self._send_ms.append((time.monotonic() - started) * 1000.0)
+        self._frame_report()
+
+    def _frame_report(self) -> None:
+        """Says, every 15 seconds, what actually happened to the preview.
+
+        Four numbers, because between them they name every place a frame can go
+        missing: how many the pump offered, how many went out, how many the cap
+        threw away, and how long the round trip took. Reported as one line so
+        that reading it later is not an exercise in correlating timestamps.
+        """
+        now = time.monotonic()
+        window = now - self._report_at
+        if window < _FRAME_REPORT_SECONDS:
+            return
+        self._report_at = now
+
+        latencies = sorted(self._send_ms)
+        offered, sent, dropped = self._frames_offered, self._frames_sent, self._frames_dropped
+        self._frames_offered = self._frames_sent = self._frames_dropped = 0
+        self._send_ms = []
+        avg_kb = (self._frame_bytes / sent / 1024.0) if sent else 0.0
+        self._frame_bytes = 0
+
+        def pct(p: float) -> float:
+            if not latencies:
+                return 0.0
+            return latencies[min(len(latencies) - 1, int(len(latencies) * p))]
+
+        logger.info(
+            "preview %s: pump %.1f fps, sent %.1f fps (%d of %d, %d dropped by "
+            "the in-flight cap of %d), POST median %.0fms p90 %.0fms, "
+            "%.1f KB/frame",
+            self.job_id or "local",
+            offered / window, sent / window, sent, offered, dropped,
+            _MAX_FRAMES_IN_FLIGHT, pct(0.5), pct(0.9), avg_kb,
+        )
 
     def update_frame_bytes(self, frame_bytes: bytes, url: Optional[str] = None):
         b64_str = base64.b64encode(frame_bytes).decode("ascii")
@@ -1291,4 +1510,18 @@ class BrowserMonitorClient:
         })
 
 
+# The shared-room client: `adk web` and anything else with one audit per
+# process. Cloud runs build their own with `monitor_for_job`.
 monitor = BrowserMonitorClient()
+
+
+def monitor_for_job(job_id: str) -> BrowserMonitorClient:
+    """A dashboard client scoped to one audit.
+
+    A fresh object rather than a job id set on the singleton, because the
+    container is allowed to run several audits at once -- `start_audit` returns
+    immediately and the work carries on in a detached task -- and a shared
+    client would mean two runs stamping each other's job id onto their frames
+    and appending to each other's `_segments`. Whoever builds one closes it.
+    """
+    return BrowserMonitorClient(job_id=job_id)

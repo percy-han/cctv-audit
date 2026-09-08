@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>门店演示录像</title>
+<style>
+  html,body{margin:0;background:#111;color:#ddd;font:15px/1.7 system-ui,sans-serif}
+  .wrap{max-width:760px;margin:0 auto;padding:28px}
+  h1{font-size:19px;margin:0 0 4px}
+  .sub{color:#888;margin:0 0 22px}
+  a.card{display:block;padding:14px 16px;margin-bottom:12px;background:#1b1e23;
+         border:1px solid #2c3138;border-radius:8px;color:#7ef0a0;text-decoration:none}
+  a.card b{color:#e8e8e8;display:block;font-size:15px}
+  a.card span{color:#8b929c;font-size:13px}
+  code{background:#22262c;padding:1px 5px;border-radius:4px;color:#cfd4da}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>门店演示录像 · CAM01 收银台</h1>
+  <p class="sub">合成画面，时长 20:00，时间码从 00:00 起，和进度条一致。</p>
+
+  <a class="card" href="/hls.html">
+    <b>分片流（HLS）→ Plan A 抓流</b>
+    <span>/hls.html</span>
+  </a>
+  <a class="card" href="/mp4.html">
+    <b>整段文件（MP4）→ Plan B 录屏</b>
+    <span>/mp4.html</span>
+  </a>
+
+  <p class="sub">
+    把上面任意一个地址粘进 Gemini Enterprise，例如
+    <code>按标准 chagee-store-v1 稽核这段录像：…/hls.html，从 05:00 开始看 5 分钟</code>
+  </p>
+</div>
+</body>
+</html>

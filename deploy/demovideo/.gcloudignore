@@ -1,0 +1,3 @@
+# assets/ must ship -- it IS the payload. Only keep the source clip out.
+*.mov
+*.mkv

@@ -14,20 +14,32 @@
 
 """Loads the SOP rule set and renders it into a prompt.
 
-Rules live in `sop_rules.yaml` so an auditor can revise the standard without a
-code change or redeploy. This file is the *only* source of audit criteria --
-text typed into the chat box is parsed for a URL and a time range and nothing
-else, deliberately: a standard that changes per message cannot be audited.
-Point `SOP_RULES_PATH` at your own file to override it.
+Rules live in a YAML file so an auditor can revise the standard without a code
+change or redeploy. That file is the *only* source of audit criteria -- text
+typed into the chat box is parsed for a URL and a time range and nothing else,
+deliberately: a standard that changes per message cannot be audited.
+
+Two ways in, and the difference matters:
+
+  * `load_rules(path)` reads a file. `SOP_RULES_PATH` on a workstation.
+  * `load_rules_for(sop_id)` reads `gs://<SOP_BUCKET>/<SOP_PREFIX>/<id>.yaml`,
+    which is how a customer picks a version from a GE prompt chip.
+
+**A named version that cannot be fetched is an error, never a substitution.**
+Quietly auditing against some other version produces a report that looks
+exactly like a real one and is not, and nobody downstream can tell. So a miss
+raises `SopUnavailable`, and the customer is told which id failed.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import yaml
 
@@ -36,6 +48,14 @@ from ..config import config
 logger = logging.getLogger("cctv_audit.sop")
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parent / "sop_rules.yaml"
+
+# A version id becomes part of an object path, and it arrives from a chat
+# message via GE. Anything outside this set could walk out of the SOP prefix.
+_SOP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+class SopUnavailable(RuntimeError):
+    """The named standard could not be loaded. Not recoverable by guessing."""
 
 
 @dataclass(frozen=True)
@@ -87,6 +107,13 @@ class SopRuleSet:
     version: int
     rules: List[SopRule]
     scan_targets: List[ScanTarget] = field(default_factory=list)
+    # Which stored standard this came from, e.g. "chagee-store-v3". Copied onto
+    # every audit record: "which version said this was a violation" has to stay
+    # answerable after the standard has moved on, and `version` alone is just an
+    # integer that different files reuse.
+    sop_id: str = ""
+    # Where it was read from, for the log line and for error messages.
+    origin: str = ""
 
     @property
     def ids(self) -> List[str]:
@@ -110,10 +137,14 @@ class SopRuleSet:
         return "\n\n".join(rule.render() for rule in self.rules)
 
 
-@lru_cache(maxsize=4)
-def load_rules(path: Optional[Path] = None) -> SopRuleSet:
-    path = Path(path) if path else (config.sop_rules_path or DEFAULT_RULES_PATH)
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+def parse_rules(text: str, origin: str, sop_id: str = "") -> SopRuleSet:
+    """Turns the YAML into a rule set, or says exactly what is wrong with it.
+
+    `origin` only appears in error messages, but it is the difference between
+    "missing required field 'name'" and knowing which of several stored
+    versions to go and fix.
+    """
+    raw = yaml.safe_load(text) or {}
     rules = []
     for entry in raw.get("rules", []):
         try:
@@ -128,19 +159,126 @@ def load_rules(path: Optional[Path] = None) -> SopRuleSet:
                 negative_indicators=list(entry.get("negative_indicators", [])),
             ))
         except KeyError as exc:
-            raise ValueError(f"SOP rule in {path} is missing required field {exc}") from exc
+            raise ValueError(f"SOP rule in {origin} is missing required field {exc}") from exc
     if not rules:
-        raise ValueError(f"No SOP rules found in {path}")
+        raise ValueError(f"No SOP rules found in {origin}")
 
     targets = []
     for entry in raw.get("visual_scan", []):
         try:
             targets.append(ScanTarget(subject=entry["subject"], question=entry["question"]))
         except KeyError as exc:
-            raise ValueError(f"visual_scan entry in {path} is missing required field {exc}") from exc
+            raise ValueError(f"visual_scan entry in {origin} is missing required field {exc}") from exc
 
     logger.info(
         "Loaded %d SOP rules and %d scan target(s) (v%s) from %s",
-        len(rules), len(targets), raw.get("version", 1), path.name,
+        len(rules), len(targets), raw.get("version", 1), origin,
     )
-    return SopRuleSet(version=int(raw.get("version", 1)), rules=rules, scan_targets=targets)
+    return SopRuleSet(
+        version=int(raw.get("version", 1)),
+        rules=rules,
+        scan_targets=targets,
+        sop_id=sop_id,
+        origin=origin,
+    )
+
+
+@lru_cache(maxsize=4)
+def load_rules(path: Optional[Path] = None) -> SopRuleSet:
+    path = Path(path) if path else (config.sop_rules_path or DEFAULT_RULES_PATH)
+    return parse_rules(path.read_text(encoding="utf-8"), origin=path.name)
+
+
+# Keyed by sop_id. A rule set is a few KB and immutable once parsed, and an
+# audit asks for it once per window, so re-reading the bucket every time would
+# be hundreds of pointless round trips inside the analysis loop.
+_by_id: Dict[str, SopRuleSet] = {}
+
+
+async def load_rules_for(sop_id: Optional[str] = None) -> SopRuleSet:
+    """The standard to judge against, by version id.
+
+    Resolution, in order:
+
+    1. The id the customer chose.
+    2. `DEFAULT_SOP_ID`, if the operator set one. That is a deliberate choice
+       made at deploy time, not a guess made at audit time.
+    3. No id at all: only allowed when no bucket is configured, i.e. a local
+       run, where `SOP_RULES_PATH` *is* the standard rather than one of many.
+
+    Anything else raises. In particular, a bucket configured and no id named
+    is an error -- picking a version on the customer's behalf is the one thing
+    this function must never do.
+    """
+    wanted = (sop_id or config.default_sop_id or "").strip()
+
+    if not wanted:
+        if config.sop_bucket:
+            raise SopUnavailable(
+                "没有指定稽核标准的版本号。"
+                f"标准存放在 gs://{config.sop_bucket}/{config.sop_prefix} 下，"
+                "请在请求里带上版本号（或给部署设置 DEFAULT_SOP_ID）。"
+            )
+        return load_rules()
+
+    if wanted in _by_id:
+        return _by_id[wanted]
+
+    if not _SOP_ID_RE.match(wanted):
+        raise SopUnavailable(
+            f"稽核标准版本号 {wanted!r} 不合法：只允许字母、数字、点、下划线和连字符。"
+        )
+
+    if not config.sop_bucket:
+        # Named a version on a deployment that has nowhere to keep versions.
+        # Falling through to the bundled file here would be exactly the silent
+        # substitution this module exists to prevent.
+        raise SopUnavailable(
+            f"请求了稽核标准 {wanted}，但没有配置 SOP_BUCKET，取不到这个版本。"
+        )
+
+    text = await _fetch_sop(wanted)
+    rules = parse_rules(text, origin=_sop_uri(wanted), sop_id=wanted)
+    _by_id[wanted] = rules
+    return rules
+
+
+def _sop_uri(sop_id: str) -> str:
+    prefix = (config.sop_prefix or "").strip("/")
+    name = f"{prefix}/{sop_id}.yaml" if prefix else f"{sop_id}.yaml"
+    return f"gs://{config.sop_bucket}/{name}"
+
+
+async def _fetch_sop(sop_id: str) -> str:
+    uri = _sop_uri(sop_id)
+
+    def _read() -> str:
+        # Lazy, like every other GCS import here: the local path and the test
+        # suite run without this package installed.
+        from google.cloud import storage
+
+        from ..gcp import credentials_without_quota_project
+
+        client = storage.Client(project=config.gcp_project or None,
+                                credentials=credentials_without_quota_project())
+        blob = client.bucket(config.sop_bucket).blob(uri.split("/", 3)[3])
+        return blob.download_as_text()
+
+    try:
+        return await asyncio.to_thread(_read)
+    except Exception as exc:
+        # Deliberately not caught anywhere upstream that could continue: the
+        # caller has to either report this to the customer or stop.
+        #
+        # 700, not 200. A GCS permission error names the missing permission
+        # about 240 characters in, so the old limit cut the sentence off one
+        # word before the only part worth reading -- and the half that survived
+        # pointed at the wrong role. Long enough to keep the whole IAM message,
+        # short enough that a stack-trace-shaped error still gets clipped.
+        raise SopUnavailable(f"取不到稽核标准 {uri}：{str(exc)[:700]}") from exc
+
+
+def clear_sop_cache() -> None:
+    """Forgets cached rule sets. For tests, and after publishing a new version."""
+    _by_id.clear()
+    load_rules.cache_clear()

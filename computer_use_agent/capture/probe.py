@@ -134,8 +134,9 @@ class StreamProbe:
                 break
             await asyncio.sleep(poll_interval)
 
-        headers = await self._build_headers()
+        base_headers = await self._build_headers()
         for url in self._playlists + self._streams:
+            headers = self._headers_for(url, base_headers)
             info = await probe_stream(url, headers)
             if info:
                 duration = _duration_of(info)
@@ -143,6 +144,7 @@ class StreamProbe:
                     mode="stream",
                     url=url,
                     headers=headers,
+                    duration_seconds=duration,
                     reason=(
                         f"ffprobe opened the player's own media URL"
                         + (f" (duration {duration:.0f}s)" if duration else " (live / unknown duration)")
@@ -155,14 +157,15 @@ class StreamProbe:
         # embedded in the page's JSON and the player byte-ranges a single
         # `.m4s` that ffprobe can open end to end. Assuming ".m4s means a few
         # seconds" cost us Plan A on every such site.
-        whole = await self._best_whole_track(headers)
+        whole = await self._best_whole_track(base_headers)
         if whole is not None:
             url, info = whole
             duration = _duration_of(info) or 0.0
             return CaptureSource(
                 mode="stream",
                 url=url,
-                headers=headers,
+                headers=self._headers_for(url, base_headers),
+                duration_seconds=duration or None,
                 reason=(f"ffprobe opened a complete media track ({duration:.0f}s, "
                         f"{_shape_of(info)}) despite there being no playlist"),
             )
@@ -188,7 +191,7 @@ class StreamProbe:
             reason = "no standard media transport observed (likely canvas + WASM decoding)"
         return CaptureSource(mode="screen", reason=reason)
 
-    async def _best_whole_track(self, headers: dict) -> Optional[tuple[str, dict]]:
+    async def _best_whole_track(self, base_headers: dict) -> Optional[tuple[str, dict]]:
         """The highest-resolution segment URL that is actually a whole track.
 
         Returns `(url, ffprobe_info)`, or None if every candidate is a real
@@ -212,7 +215,7 @@ class StreamProbe:
                             _MAX_SEGMENT_PROBES, len(self._segments) - _MAX_SEGMENT_PROBES)
                 break
 
-            info = await probe_stream(url, headers)
+            info = await probe_stream(url, self._headers_for(url, base_headers))
             if not info:
                 continue
             duration = _duration_of(info) or 0.0
@@ -225,6 +228,21 @@ class StreamProbe:
                 best = (area, url, info)
 
         return (best[1], best[2]) if best else None
+
+    @staticmethod
+    def _headers_for(url: str, base: dict) -> dict:
+        """`base` plus a Google ID token, if this URL's origin needs one.
+
+        Per URL and not once per page, because the page and its media are not
+        always on the same host. Adding the token to the shared header block
+        would hand this deployment's identity to whichever CDN the player
+        happens to pull from -- and the audit works either way, so nothing
+        would ever surface the mistake.
+        """
+        from ..gcp import id_token_for
+
+        token = id_token_for(url)
+        return {**base, "Authorization": f"Bearer {token}"} if token else base
 
     async def _build_headers(self) -> dict:
         """Media URLs are usually auth'd by cookie and gated on Referer."""

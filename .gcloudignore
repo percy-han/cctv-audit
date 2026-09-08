@@ -1,0 +1,33 @@
+# What must never leave this machine, and what would only slow the upload.
+#
+# This file exists rather than being left to default to .gitignore, because the
+# default is silent: add one entry to .gitignore for an unrelated reason and
+# the build context changes underneath you. The first two blocks are security,
+# not tidiness -- read them before deleting a line.
+
+# Live session cookies. Uploading these puts a logged-in session in a build
+# log and, if the Dockerfile ever COPYs the tree, in a registry image.
+auth/
+computer_use_agent/.env
+*.env
+
+# Audit output: evidence frames are footage of identifiable people, and the
+# record trail names stores and times. None of it belongs in a build context.
+computer_use_agent/checkpoints/
+.work/
+
+# Weight, not secrecy.
+.venv/
+.git/
+.pytest_cache/
+__pycache__/
+*.pyc
+tests/
+deploy/phase0/results/
+*.md
+
+# Local `adk web` state: a session database from this workstation. It is not a
+# secret, but it does get COPYed into the image, where it is one more file
+# nobody put there on purpose.
+computer_use_agent/.adk/
+.DS_Store

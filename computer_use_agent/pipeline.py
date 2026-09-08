@@ -27,21 +27,24 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from playwright.async_api import async_playwright
 
-from .analyzer import VideoAnalyzer, load_rules
+from .analyzer import SopRuleSet, VideoAnalyzer, load_rules
+from .artifacts import artifact_sink
 from .capture.preview import LivePreview
 from .capture.probe import StreamProbe
 from .capture.screen_recorder import ScreenRecorder, content_box
 from .capture.stream_grabber import StreamGrabber
 from .capture.types import CaptureSource, Clip
 from .config import config
+from .gcp import id_token_for
 from .navigator import ComputerUseFallback, HumanGate, for_target, load_state, platform_of, save_state
 from .store import AuditStore
 
@@ -62,6 +65,49 @@ _CHROMIUM_ARGS = [
 def _same_box(a: dict, b: dict, tolerance: float = 4.0) -> bool:
     """Is the player still where it was? Sub-pixel layout jitter does not count."""
     return all(abs(a[k] - b[k]) <= tolerance for k in ("x", "y", "width", "height"))
+
+
+async def _attach_oidc_headers(context) -> None:
+    """Adds a Google ID token to requests bound for IAM-protected origins.
+
+    One route per configured origin, never a catch-all `**/*`. The pattern is
+    what enforces the scoping: Playwright only invokes the handler for URLs
+    that match it, so a page on a protected origin that pulls a thumbnail from
+    a CDN cannot pick the token up on the way past. A single handler that
+    inspected `route.request.url` itself would work too, and would put the one
+    check that matters inside a function instead of in the router where it
+    cannot be skipped by an early return.
+
+    Does nothing when `OIDC_ORIGINS` is empty, which is the default and the
+    only configuration that has ever run against bilibili.
+    """
+    for origin in config.oidc_origins:
+        token = id_token_for(origin)
+        if not token:  # origin is listed but minting declined -- nothing to add
+            continue
+        await context.route(f"{origin}/**", _authorising_handler(f"Bearer {token}"))
+        logger.info("Requests to %s will carry a Google ID token.", origin)
+
+
+def _authorising_handler(header: str):
+    """A one-argument route handler that adds `Authorization: <header>`.
+
+    A closure and not a default argument (`async def h(route, _hdr=header)`),
+    which is the obvious way to write it and is wrong: Playwright inspects the
+    handler's arity and calls a two-parameter handler as `(route, request)`.
+    The default silently became a Request object and every navigation died with
+
+        TypeError: Route.continue_: Object of type Request is not JSON
+        serializable
+
+    sixty seconds later, as a page-load timeout with no mention of routing.
+    """
+    async def _add_auth(route):
+        await route.continue_(
+            headers={**route.request.headers, "authorization": header}
+        )
+
+    return _add_auth
 
 
 class BudgetExceeded(Exception):
@@ -98,6 +144,72 @@ class AuditRequest:
     start_seconds: float = 0.0
     duration_seconds: Optional[float] = None  # None -> run until a budget stops us
 
+    @property
+    def end_seconds(self) -> Optional[float]:
+        if self.duration_seconds is None:
+            return None
+        return self.start_seconds + self.duration_seconds
+
+
+@dataclass(frozen=True)
+class PreflightResult:
+    """What a look at the video tells us, before committing to an audit.
+
+    This is the thing a customer is asked to confirm, so every field here has
+    to be answerable in seconds and readable by someone who does not know how
+    the capture works. "Plan A" and "Plan B" are our words; `capture_reason`
+    is what gets shown.
+
+    `ok=False` is a normal outcome, not an exception: "that video is not there"
+    and "the hour you asked for is past the end of the recording" are answers,
+    and turning them into stack traces loses the part the customer needs.
+    """
+
+    ok: bool
+    target: str
+    platform: str
+    capture_mode: str = ""          # "stream" | "screen"
+    capture_reason: str = ""
+    video_duration_seconds: Optional[float] = None
+    requested_start_seconds: float = 0.0
+    requested_end_seconds: Optional[float] = None
+    # False when the recording plainly does not reach the requested end. Note
+    # this is a *prediction*; `_coverage` reports what was actually watched.
+    span_available: bool = True
+    problem: Optional[str] = None
+    # Locator for a still from the moment we opened the page, so the customer
+    # can see we are looking at their shop and not somebody else's.
+    cover_frame: Optional[str] = None
+    title: str = ""
+
+    def as_dict(self) -> dict:
+        return {
+            "ok": self.ok,
+            "target": self.target,
+            "platform": self.platform,
+            "capture_mode": self.capture_mode,
+            "capture_reason": self.capture_reason,
+            "video_duration_seconds": self.video_duration_seconds,
+            "requested_start_seconds": self.requested_start_seconds,
+            "requested_end_seconds": self.requested_end_seconds,
+            "span_available": self.span_available,
+            "problem": self.problem,
+            "cover_frame": self.cover_frame,
+            "title": self.title,
+        }
+
+
+@dataclass
+class _Session:
+    """A live browser sitting on a playing video, with the plan for capturing it."""
+
+    page: object
+    context: object
+    navigator: object
+    source: CaptureSource
+    work_dir: Path
+    platform: str
+
 
 class AuditPipeline:
     def __init__(
@@ -106,17 +218,27 @@ class AuditPipeline:
         gate: Optional[HumanGate] = None,
         on_preview_frame: Optional[Callable[[str], None]] = None,
         on_status: Optional[Callable[[str, dict], None]] = None,
+        rules: Optional[SopRuleSet] = None,
+        has_viewers: Optional[Callable[[], Awaitable[bool]]] = None,
     ):
         problems = config.validate()
         if problems:
             raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(problems))
         config.ensure_dirs()
 
-        self.store = store or AuditStore()
+        # Resolved by the caller when a customer picked a version -- see
+        # `load_rules_for`. The local file is the standard only when nobody
+        # named one, which is the `adk web` case.
+        self.rules = rules or load_rules()
+        self.store = store or AuditStore(rules=self.rules)
         self.gate = gate or HumanGate()
         self.on_preview_frame = on_preview_frame
+        # Left None, the preview streams unconditionally -- correct locally,
+        # where the frames never leave the machine. The cloud path supplies a
+        # probe so an unwatched audit costs no egress at all.
+        self.has_viewers = has_viewers
         self.on_status = on_status
-        self.analyzer = VideoAnalyzer(load_rules())
+        self.analyzer = VideoAnalyzer(self.rules)
         self.budget = Budget()
         self.source: Optional[CaptureSource] = None
         self._stop = asyncio.Event()
@@ -133,6 +255,10 @@ class AuditPipeline:
         # Video offset past which there is no more footage, only the player's
         # frozen last frame. Set by the watchdog; honoured by the workers.
         self._footage_ends_at: Optional[float] = None
+        # Whether we have already told the operator the picture stopped moving.
+        # Latched, because the watchdog polls every few seconds and the one
+        # thing worse than a silent freeze is the same warning forty times.
+        self._picture_frozen = False
 
     def stop(self, reason: str = "stop requested", kind: str = "requested") -> None:
         """Requests a graceful shutdown from outside the pipeline."""
@@ -149,8 +275,45 @@ class AuditPipeline:
             except Exception as exc:
                 logger.debug("Status hook failed: %s", exc)
 
-    async def run(self, request: AuditRequest) -> dict:
-        work_dir = config.work_dir / f"run_{int(time.time())}"
+    def _note_picture_frozen(self, reason: str) -> None:
+        """Says once, out loud, that the dashboard has stopped moving.
+
+        This exists because of how the bilibili run failed: the picture froze
+        for two minutes and every other signal said the job was healthy. The
+        job *was* healthy -- Plan A does not need the page -- but nobody
+        watching could tell the difference between "the browser paused" and
+        "the whole thing died", and the logs did not say either.
+
+        A warning that fires when nothing is wrong gets ignored, so this is
+        deliberately narrow: it means the picture, and only the picture.
+        """
+        if self._picture_frozen:
+            return
+        self._picture_frozen = True
+        logger.warning("Dashboard picture frozen: %s", reason)
+        self._emit("picture_frozen", {"reason": reason})
+
+    @contextlib.asynccontextmanager
+    async def _browser_session(self, request: AuditRequest, *, live_preview: bool = True):
+        """Opens the page, gets it playing, and decides how to capture it.
+
+        Everything up to and including `probe.decide()` is the same work for a
+        preflight and for a real audit -- and it is the part that touches the
+        network, so it is the part that breaks. Keeping one copy means a fix to
+        the login dance or the probe timing lands on both paths at once.
+
+        Yields a `_Session`, and tears the browser and the work directory down
+        on the way out whichever path raised.
+
+        The session deliberately does not outlive the `async with`. Preflight
+        and start_audit arrive as two separate GE turns and are not guaranteed
+        to land on the same container instance, so a browser held open between
+        them would be a browser the second turn cannot see.
+        """
+        # Milliseconds, not seconds: a preflight and the audit it approves can
+        # start within the same second, and sharing a directory means the
+        # preflight's cleanup deletes the audit's clips out from under it.
+        work_dir = config.work_dir / f"run_{int(time.time() * 1000)}"
         work_dir.mkdir(parents=True, exist_ok=True)
         platform = platform_of(request.target)
 
@@ -162,12 +325,13 @@ class AuditPipeline:
                 viewport={"width": config.screen_width, "height": config.screen_height},
                 storage_state=load_state(platform),
             )
+            await _attach_oidc_headers(context)
             page = await context.new_page()
 
             # Started before navigation, not after: the login wall, the CAPTCHA
             # and the "video unavailable" page are exactly the moments an
             # operator needs to see, and they all happen before playback.
-            if self.on_preview_frame is not None:
+            if live_preview and self.on_preview_frame is not None:
                 preview = LivePreview(
                     page=page,
                     on_frame=self.on_preview_frame,
@@ -175,6 +339,7 @@ class AuditPipeline:
                     width=config.preview_width,
                     height=config.preview_height,
                     quality=config.preview_quality,
+                    has_viewers=self.has_viewers,
                 )
                 await preview.start()
 
@@ -203,35 +368,14 @@ class AuditPipeline:
             self.source = source
             self._emit("capture_mode", {"mode": source.mode, "reason": source.reason})
 
-            producer = await self._build_producer(
-                source, page, navigator, work_dir, request,
+            yield _Session(
+                page=page,
+                context=context,
+                navigator=navigator,
+                source=source,
+                work_dir=work_dir,
+                platform=platform,
             )
-
-            queue: asyncio.Queue = asyncio.Queue(maxsize=config.clip_queue_size)
-            capture_task = asyncio.create_task(self._capture(producer, queue, request))
-            workers = [
-                asyncio.create_task(self._analyse(queue, i))
-                for i in range(config.analysis_concurrency)
-            ]
-            # Plan A pulls the media independently and stops at EOF by itself;
-            # only the page-bound recorder needs minding.
-            watchdog = (
-                asyncio.create_task(self._watch_page(page, navigator))
-                if source.mode == "screen" else None
-            )
-
-            try:
-                await capture_task
-            finally:
-                if watchdog is not None:
-                    watchdog.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await watchdog
-                # Sentinel per worker so each one exits after draining.
-                for _ in workers:
-                    await queue.put(None)
-                await asyncio.gather(*workers, return_exceptions=True)
-
         finally:
             for closer in (
                 lambda: preview.aclose() if preview else None,
@@ -247,6 +391,175 @@ class AuditPipeline:
                     logger.debug("Shutdown step failed: %s", exc)
             if not config.keep_clips:
                 shutil.rmtree(work_dir, ignore_errors=True)
+
+    async def preflight(self, request: AuditRequest, job_id: str = "preflight") -> PreflightResult:
+        """Looks at the video and reports back, without auditing anything.
+
+        Takes seconds to a minute. That matters: this is the call that has to
+        answer inside one GE turn, and the audit it describes cannot.
+
+        Failures here are *returned*, not raised. "That link does not open" and
+        "your hour is past the end of the recording" are the two answers a
+        customer is most likely to get, and they are the two an exception
+        would turn into a stack trace with the useful part missing.
+        """
+        try:
+            async with self._browser_session(request, live_preview=False) as session:
+                duration = await self._video_duration(session)
+                cover = await self._cover_frame(session.page, job_id)
+                title = ""
+                with contextlib.suppress(Exception):
+                    title = await session.page.title()
+
+                requested_end = request.end_seconds
+                # One window of slack, matching `_coverage`: the last clip is
+                # cut on a window boundary, so landing seconds short is not a
+                # shortfall and should not be reported to the customer as one.
+                tolerance = max(float(config.window_seconds), 5.0)
+                fmt = Clip.format_offset
+
+                # Unknown duration means live, or a player that will not say.
+                # Neither is a reason to refuse -- it is a reason not to claim.
+                span_available = True
+                problem: Optional[str] = None
+                if duration is not None:
+                    if request.start_seconds >= duration:
+                        # Nothing to audit at all. This is the one preflight
+                        # outcome that has to be ok=False on a page that opened
+                        # fine: starting the audit would produce an empty
+                        # report rather than an error.
+                        return PreflightResult(
+                            ok=False,
+                            target=request.target,
+                            platform=session.platform,
+                            capture_mode=session.source.mode,
+                            capture_reason=session.source.reason,
+                            video_duration_seconds=round(duration, 1),
+                            requested_start_seconds=request.start_seconds,
+                            requested_end_seconds=requested_end,
+                            span_available=False,
+                            problem=(
+                                f"视频只有 {fmt(duration)} 长，"
+                                f"请求的起点 {fmt(request.start_seconds)} 已经超出了视频末尾"
+                            ),
+                            cover_frame=cover,
+                            title=title,
+                        )
+                    if requested_end is not None and requested_end > duration + tolerance:
+                        span_available = False
+                        problem = (
+                            f"视频只有 {fmt(duration)} 长，请求的是到 {fmt(requested_end)}，"
+                            f"最多只能稽核到 {fmt(duration)}"
+                        )
+
+                result = PreflightResult(
+                    ok=True,
+                    target=request.target,
+                    platform=session.platform,
+                    capture_mode=session.source.mode,
+                    capture_reason=session.source.reason,
+                    video_duration_seconds=round(duration, 1) if duration is not None else None,
+                    requested_start_seconds=request.start_seconds,
+                    requested_end_seconds=requested_end,
+                    span_available=span_available,
+                    problem=problem,
+                    cover_frame=cover,
+                    title=title,
+                )
+        except Exception as exc:
+            logger.exception("Preflight failed for %s: %s", request.target, exc)
+            result = PreflightResult(
+                ok=False,
+                target=request.target,
+                platform=platform_of(request.target),
+                requested_start_seconds=request.start_seconds,
+                requested_end_seconds=request.end_seconds,
+                span_available=False,
+                problem=f"打不开这个视频：{str(exc)[:200]}",
+            )
+        self._emit("preflight", result.as_dict())
+        return result
+
+    async def _video_duration(self, session: "_Session") -> Optional[float]:
+        """How long the recording is, from whichever source can say.
+
+        ffprobe read the container, so it wins when Plan A applies. Plan B has
+        no container to read, and the `<video>` element's own `duration` is
+        then the only number available -- it is also the number the platform's
+        own timeline is drawn from, so it is the one the customer would quote.
+        """
+        if session.source.duration_seconds:
+            return session.source.duration_seconds
+        try:
+            state = await session.navigator.read_playback_state(session.page)
+        except Exception as exc:
+            logger.debug("Could not read playback state for duration: %s", exc)
+            return None
+        raw = (state or {}).get("duration")
+        try:
+            value = float(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+        # A live stream reports Infinity, and `float("inf")` compares larger
+        # than every requested end -- which would silently pass every span
+        # check rather than admitting we do not know.
+        return value if value and value != float("inf") else None
+
+    async def _cover_frame(self, page, job_id: str) -> Optional[str]:
+        """A still of what we opened, so the customer can see it is their shop.
+
+        Best effort on purpose: a preflight that can otherwise answer every
+        question is not worth failing over a screenshot.
+        """
+        try:
+            shot = await page.screenshot(type="jpeg", quality=config.preview_quality)
+            return await artifact_sink().put(f"{job_id}/cover.jpg", shot, "image/jpeg")
+        except Exception as exc:
+            logger.warning("Could not capture a cover frame: %s", str(exc)[:200])
+            return None
+
+    async def run(self, request: AuditRequest) -> dict:
+        async with self._browser_session(request) as session:
+            page, navigator = session.page, session.navigator
+            source, work_dir = session.source, session.work_dir
+
+            producer = await self._build_producer(
+                source, page, navigator, work_dir, request,
+            )
+
+            queue: asyncio.Queue = asyncio.Queue(maxsize=config.clip_queue_size)
+            capture_task = asyncio.create_task(self._capture(producer, queue, request))
+            workers = [
+                asyncio.create_task(self._analyse(queue, i))
+                for i in range(config.analysis_concurrency)
+            ]
+            # Both plans need the page minded, for different reasons.
+            #
+            # Plan B is bound to the page, so the page decides when the run
+            # ends. Plan A pulls the media independently and stops at EOF by
+            # itself -- but the *picture on the dashboard* still comes from
+            # this page, and that is not a detail we get to ignore. Measured
+            # on bilibili (job 692b53): the login nag appears about 70 seconds
+            # in, pauses the video, and Chromium then has nothing to repaint,
+            # so the screencast delivers 0 fps for the rest of the run. The
+            # pump kept forwarding at 11.9 fps and every frame was byte-for-byte
+            # the same 84.3 KB still. The audit was fine and the operator was
+            # staring at a frozen screen -- which is how you lose a demo while
+            # every number on the dashboard says success.
+            watchdog = asyncio.create_task(
+                self._watch_page(page, navigator, page_is_source=source.mode == "screen")
+            )
+
+            try:
+                await capture_task
+            finally:
+                watchdog.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watchdog
+                # Sentinel per worker so each one exits after draining.
+                for _ in workers:
+                    await queue.put(None)
+                await asyncio.gather(*workers, return_exceptions=True)
 
         summary = {
             **self.store.summary(),
@@ -324,6 +637,14 @@ class AuditPipeline:
             # sidebars and comments is not worth watching. Costs one call.
             if config.fullscreen_player:
                 await navigator.enter_fullscreen(page)
+                # Remembered on this path too, and not only on Plan B's.
+                # bilibili's login nag drops the player out of web fullscreen
+                # and dismissing it does not put it back (see _hold_geometry),
+                # so without a baseline the operator spends the rest of the run
+                # watching a postage stamp in the corner of a comments page.
+                # Nothing is being recorded here, so this is only ever about
+                # the picture -- which is the entire reason we went fullscreen.
+                self._player_rect = await navigator.video_rect(page)
 
             # Plan A pulls the media independently of the page, so the playhead
             # is irrelevant; ffmpeg seeks with -ss instead. The page is left
@@ -454,22 +775,33 @@ class AuditPipeline:
                             round(rect["width"]), round(rect["height"])] if rect else None),
             })
             logger.warning(
-                "Player moved from %sx%s@(%s,%s) and could not be restored; the "
-                "recording is now framing the wrong region.",
+                "Player moved from %sx%s@(%s,%s) and could not be restored; "
+                "whatever is being captured or shown now frames the wrong region.",
                 round(was["width"]), round(was["height"]), round(was["x"]), round(was["y"]),
             )
 
-    async def _watch_page(self, page, navigator) -> None:
-        """Housekeeping for Plan B, which is the only mode tied to the page.
+    async def _watch_page(self, page, navigator, *, page_is_source: bool = True) -> None:
+        """Housekeeping for the page, on both plans.
 
-        Two jobs the recorder cannot do for itself:
+        Three jobs nothing else does:
 
         * Keep the player visible. Login nags and session-expiry prompts get
           re-raised while the audit runs, and the recorder would happily
           capture a dialog box sitting on top of the footage.
+        * Keep it playing. A nag that pauses the video freezes everything
+          downstream of the page.
         * Notice the end. A finished <video> renders its last frame forever, so
           without this a 15-minute recording keeps producing identical windows
           until the wall-clock budget expires -- billing for every one of them.
+
+        `page_is_source` is what separates the two plans, and only the third
+        job depends on it. Under Plan B the page *is* the footage, so the page
+        running out is the run running out. Under Plan A ffmpeg pulls the media
+        itself and the page is only the picture on the dashboard: tend it, but
+        never let it end the audit. Getting that backwards would kill a healthy
+        Plan A run the moment bilibili paused the player -- an audit stopped at
+        01:19 of a requested 05:00, because of a dialog box in a browser
+        nobody was reading the pixels of.
 
         Stalls are treated as end-of-video only after several consecutive
         polls, so buffering on a slow link does not abort a live audit -- but a
@@ -495,7 +827,14 @@ class AuditPipeline:
         # Nudge the player every 10s of stall, up to three times, before
         # concluding the footage is over.
         recover_every = max(2, int(10.0 / poll))
-        max_recoveries = 3
+        # Three strikes only makes sense when the strikes lead to a verdict.
+        # Plan B gives up and calls the footage finished; Plan A has nothing to
+        # conclude -- ffmpeg is feeding the audit either way -- so it keeps
+        # trying for as long as the run lasts. bilibili re-raises its login nag
+        # every couple of minutes and each one pauses the player again, so a
+        # Plan A run that stopped nudging after the third would show a still
+        # for the remaining fifty minutes.
+        max_recoveries: float = 3 if page_is_source else math.inf
         last_time: Optional[float] = None
 
         while not self._stop.is_set():
@@ -508,25 +847,36 @@ class AuditPipeline:
                 logger.debug("Page watchdog poll failed: %s", exc)
                 continue
 
-            if not config.stop_on_video_end or not state:
+            if not state:
                 continue
 
-            if state.get("ended"):
-                at = round(state.get("current_time") or 0.0, 1)
-                self._footage_ends_at = at
-                self._emit("video_ended", {"at_seconds": at})
-                self.stop(f"视频已播放完毕（{Clip.format_offset(at)}）", kind="video_ended")
-                return
+            # Only Plan B gets to end the run from what the page says. Plan A
+            # keeps tending the page below either way.
+            may_stop = page_is_source and config.stop_on_video_end
 
             current = state.get("current_time")
             duration = state.get("duration")
-            if duration and current is not None and current >= duration - 1.0:
-                self._footage_ends_at = round(current, 1)
-                self._emit("video_ended", {"at_seconds": round(current, 1)})
-                self.stop(
-                    f"视频已播放完毕（{Clip.format_offset(current)}）", kind="video_ended"
+            over = bool(
+                state.get("ended")
+                or (duration and current is not None and current >= duration - 1.0)
+            )
+            if over:
+                if may_stop:
+                    at = round(current or 0.0, 1)
+                    self._footage_ends_at = at
+                    self._emit("video_ended", {"at_seconds": at})
+                    self.stop(
+                        f"视频已播放完毕（{Clip.format_offset(at)}）", kind="video_ended"
+                    )
+                    return
+                # Plan A: the page finishing says nothing about the audit, and
+                # nudging an ended <video> restarts it from zero -- which on the
+                # dashboard looks like the audit jumped back to the beginning.
+                # Say it once and leave the last frame up.
+                self._note_picture_frozen(
+                    "网页里的视频已播完，画面停在最后一帧（稽核不受影响，仍在继续）"
                 )
-                return
+                continue
 
             # A paused player is not necessarily finished -- a human may be
             # working the gate -- so only a playhead that stops moving counts.
@@ -547,24 +897,35 @@ class AuditPipeline:
                         await navigator.ensure_playing(page)
                     except Exception as exc:
                         logger.debug("Could not restart playback: %s", exc)
-                exhausted = near_end or recoveries >= max_recoveries
-                if exhausted and stalled >= (tail_stall_limit if near_end else stall_limit):
-                    held = round(stalled * poll, 1)
+                held_long = stalled >= (tail_stall_limit if near_end else stall_limit)
+                held = round(stalled * poll, 1)
+                tail = "" if near_end else f"，已尝试 {recoveries} 次恢复播放"
+                if held_long and may_stop and (near_end or recoveries >= max_recoveries):
                     self._footage_ends_at = round(current, 1)
                     self._emit("playback_stalled", {
                         "at_seconds": round(current, 1),
                         "for_seconds": held,
                         "recovery_attempts": recoveries,
                     })
-                    tail = "" if near_end else f"，已尝试 {recoveries} 次恢复播放"
                     self.stop(
                         f"播放在 {Clip.format_offset(current)} 卡住 {held:.0f} 秒不再前进{tail}",
                         kind="playback_stalled",
                     )
                     return
+                if held_long and not may_stop:
+                    # Plan A: the nudging above carries on regardless -- this
+                    # only says out loud what the operator is already looking
+                    # at. Deliberately not gated on having run out of retries,
+                    # because Plan A never runs out: without this, a picture
+                    # that never comes back would never be mentioned either.
+                    self._note_picture_frozen(
+                        f"网页画面卡在 {Clip.format_offset(current)} 不动了{tail}。"
+                        f"稽核不受影响，仍在继续。"
+                    )
             else:
                 if stalled:
                     logger.info("Playback resumed at %.1fs.", current or 0.0)
+                    self._picture_frozen = False
                 # Playback moved, so whatever we did worked (or it recovered on
                 # its own). Give the next stall a fresh set of attempts.
                 stalled = 0

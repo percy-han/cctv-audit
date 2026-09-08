@@ -309,8 +309,24 @@ async def m_probe_log(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+async def m_jobs(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Reads the background job table.
+
+    Exists so the background-survival experiment can be polled over `:query`
+    without opening a GE conversation for every check -- each GE turn mints a
+    session and clutters the very log being read.
+    """
+    return {
+        "ok": True,
+        "instance": INSTANCE_ID,
+        "uptime_seconds": round(time.time() - BOOT_TIME, 1),
+        "jobs": _JOBS,
+    }
+
+
 UNARY_METHODS = {
     "hello": m_hello,
+    "jobs": m_jobs,
     "hang": m_hang,
     "egress": m_egress,
     "confirm_flow": m_confirm_flow,
@@ -459,6 +475,16 @@ def _command(text: str) -> tuple:
     understand a sentence; the moment it needs to, that job belongs to a model.
     """
     lowered = text.lower()
+    # Before `hang`, deliberately: "后台挂 1800 秒" is a background request,
+    # and matching `hang` first would run it in the foreground -- turning the
+    # one experiment that matters into a repeat of one already done.
+    for word in ("bg", "后台"):
+        if word in lowered:
+            digits = "".join(c if c.isdigit() else " " for c in lowered).split()
+            return "bg", float(digits[0]) if digits else 1800.0
+    for word in ("status", "状态", "单号", "好了吗"):
+        if word in lowered:
+            return "status", None
     for word in ("hang", "挂"):
         if word in lowered:
             digits = "".join(c if c.isdigit() else " " for c in lowered).split()
@@ -483,6 +509,72 @@ def _command(text: str) -> tuple:
 # Keyed by the GE session id, which is the only handle we get on "the same
 # conversation". Whether it survives to the second turn is precisely probe 3.
 _GE_SESSIONS: Dict[str, Dict[str, Any]] = {}
+
+
+# --- detached background jobs -------------------------------------------
+#
+# This is the load-bearing experiment for the whole design. Measured already:
+# work awaited *inside* a streaming turn is cancelled at exactly 900s. The
+# plan's answer is "don't await it -- hand it to a background task and return
+# a job id immediately". That answer is currently an assumption, and everything
+# rests on it, so here it is as a probe.
+#
+# The task is started with `asyncio.create_task` and deliberately NOT awaited,
+# so it does not belong to the request coroutine and the request's cancellation
+# has nothing to propagate to. If a job still dies at 900s, the whole
+# "start and poll" design is dead and we need Cloud Tasks or a worker service.
+_JOBS: Dict[str, Dict[str, Any]] = {}
+
+# Strong references. asyncio only holds a *weak* one to a running task, so a
+# task nobody keeps can be garbage-collected mid-flight -- which would look
+# exactly like the platform killing it and would send us chasing the wrong
+# thing. Discard on completion so this cannot grow without bound.
+_JOB_TASKS: set = set()
+
+
+async def _run_job(job_id: str, seconds: float, session_id: str, user_id: str) -> None:
+    """Sleeps `seconds`, updating progress, outside of any request."""
+    job = _JOBS[job_id]
+    started = time.monotonic()
+    try:
+        while True:
+            remaining = seconds - (time.monotonic() - started)
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(15.0, remaining))
+            # Progress lives in the dict, not the log: a 30-minute job at one
+            # entry per 15s would push everything else out of the ring buffer.
+            job["elapsed"] = round(time.monotonic() - started, 1)
+            job["instance"] = INSTANCE_ID
+        job["state"] = "done"
+        job["elapsed"] = round(time.monotonic() - started, 1)
+        record("job_completed", job=job_id, requested=seconds, elapsed=job["elapsed"])
+    except asyncio.CancelledError:
+        # The result we are actually hunting for. If this fires around 900s,
+        # detaching did not help.
+        job["state"] = "cancelled"
+        job["elapsed"] = round(time.monotonic() - started, 1)
+        record("job_cancelled", job=job_id, requested=seconds, elapsed=job["elapsed"])
+        raise
+
+
+def _start_job(seconds: float, session_id: str, user_id: str) -> str:
+    job_id = uuid.uuid4().hex[:6]
+    _JOBS[job_id] = {
+        "state": "running",
+        "requested": seconds,
+        "elapsed": 0.0,
+        "session_id": session_id,
+        "user_id": user_id,
+        "instance": INSTANCE_ID,
+        "started_at": time.time(),
+    }
+    task = asyncio.create_task(_run_job(job_id, seconds, session_id, user_id))
+    _JOB_TASKS.add(task)
+    task.add_done_callback(_JOB_TASKS.discard)
+    record("job_started", job=job_id, requested=seconds,
+           session_id=session_id, user_id=user_id)
+    return job_id
 
 
 async def m_ge_turn(payload: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
@@ -546,6 +638,32 @@ async def m_ge_turn(payload: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
         elapsed = round(time.monotonic() - started, 2)
         record("ge_stream_completed", requested=amount, ticks=tick, elapsed=elapsed)
         yield out(f"流式跑完 {elapsed} 秒，共 {tick} 个心跳。")
+        return
+
+    if verb == "bg":
+        # Return immediately. This turn must be short -- that is the shape the
+        # real audit has to take, so the probe takes it too.
+        job_id = _start_job(amount, session_id, str(request.get("user_id") or ""))
+        yield out(
+            f"好，开始了，单号 {job_id}，预计 {amount:.0f} 秒。"
+            f"实例 {INSTANCE_ID}。回「状态」查进度。",
+        )
+        return
+
+    if verb == "status":
+        # Answers the customer's "好了吗". Also the readout for the experiment:
+        # a job that reads `done` with elapsed ≈ requested > 900s is the proof
+        # that detaching works.
+        if not _JOBS:
+            yield out(f"这个实例（{INSTANCE_ID}）上没有任何任务记录。")
+            return
+        lines = []
+        for job_id, job in _JOBS.items():
+            lines.append(
+                f"{job_id}: {job['state']} {job['elapsed']:.0f}/{job['requested']:.0f}s"
+                f" session={job['session_id'][:12] or '(空)'}"
+            )
+        yield out(f"实例 {INSTANCE_ID}，共 {len(_JOBS)} 个任务：\n" + "\n".join(lines))
         return
 
     if verb == "egress":

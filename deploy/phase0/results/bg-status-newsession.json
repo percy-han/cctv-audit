@@ -1,0 +1,53 @@
+{
+  "message": {
+    "contextId": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/17956608235409336570",
+    "role": "ROLE_AGENT",
+    "content": [
+      {
+        "text": "实例 93418912-pid1，共 1 个任务：\na36b2b: done 1800/1800s session=161861831096"
+      }
+    ],
+    "metadata": {
+      "agentInfo": {
+        "agent": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/assistants/default_assistant/agents/16091433261218097511",
+        "displayName": "CCTV 稽核探针"
+      },
+      "sessionInfo": {
+        "turnId": "17956608235409336570_8978441815216085011",
+        "session": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/17956608235409336570",
+        "queryId": "8978441815216084328"
+      },
+      "assistToken": "NMwKDAj40OXUBhDK5o6BAhIkNmE5OGYzNGEtMDAwMC0yZDYyLTg1YzktMTQyMjNiYWRhNDhh",
+      "answer": {
+        "state": "SUCCEEDED",
+        "name": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/17956608235409336570/assistAnswers/8978441815216082964",
+        "diagnosticInfo": {
+          "plannerSteps": [
+            {
+              "queryStep": {
+                "parts": [
+                  {
+                    "text": "状态"
+                  }
+                ]
+              },
+              "createTime": "2026-09-03T12:30:49.061216994Z"
+            },
+            {
+              "planStep": {
+                "role": "MODEL",
+                "parts": [
+                  {
+                    "text": "实例 93418912-pid1，共 1 个任务：\na36b2b: done 1800/1800s session=161861831096"
+                  }
+                ],
+                "planStepId": "8594107682246572486"
+              },
+              "createTime": "2026-09-03T12:30:49.351586270Z"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+# Belt and braces with .gcloudignore: that one governs what reaches Cloud
+# Build, this one what reaches the image. A local `docker build` obeys only
+# this file, so the secrets have to be listed in both.
+auth/
+computer_use_agent/.env
+*.env
+computer_use_agent/checkpoints/
+.work/
+.venv/
+.git/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# Local `adk web` state: a session database from this workstation. It is not a
+# secret, but it does get COPYed into the image, where it is one more file
+# nobody put there on purpose.
+computer_use_agent/.adk/
+.DS_Store

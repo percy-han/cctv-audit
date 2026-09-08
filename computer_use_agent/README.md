@@ -118,10 +118,11 @@ cp computer_use_agent/.env.example computer_use_agent/.env
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `WINDOW_SECONDS` | 15 | 分析窗口（视频秒）。改成 600 做 10 分钟长窗口也可以 |
+| `WINDOW_SECONDS` | 30 | 分析窗口（视频秒）。要配合 `MEDIA_PROCESSING` 一起选，见下条 |
+| `MEDIA_PROCESSING` | static | `static` 按 `ANALYSIS_FPS` 均匀抽帧；`agentic` 让模型自己决定看哪段。agentic 有固定的工具开销，只有长窗口才摊得回来——实测每 5 分钟素材：30s 窗口 static 55,590 / agentic 93,360，300s 窗口 static 23,226 / **agentic 17,800**。所以要么 30s+static，要么 300s+agentic，别混。agentic 还要求 `ANALYSIS_MODEL=gemini-3.8-flash`，且会忽略 `ANALYSIS_FPS` 和 `MEDIA_RESOLUTION` |
 | `WINDOW_OVERLAP_SECONDS` | 3 | 窗口重叠。跨边界的动作（"拿了手机又摸杯口"）若被切飞，两侧窗口都看不见 |
 | `CAPTURE_MODE` | auto | `auto` 探测；`stream` 强制 Plan A；`screen` 强制 Plan B |
-| `MEDIA_RESOLUTION` | low | low ≈ 66 tok/帧，high ≈ 258 tok/帧。判"有没有戴蓝手套"这类细节要用 high |
+| `MEDIA_RESOLUTION` | low | low ≈ 66 tok/帧，high ≈ 258 tok/帧。判"有没有戴蓝手套"这类细节要用 high。**`agentic` 下不生效** |
 | `FULLSCREEN_PLAYER` | true | 让播放器铺满视口再录，画面细节是真的变多，不只是没被裁掉 |
 | `CROP_TO_PLAYER` | true | 裁掉页头/侧栏，以及全屏后播放器内的黑边（竖屏视频在 16:9 视口里三分之二是黑的） |
 | `STOP_ON_VIDEO_END` | true | 播完的 `<video>` 会一直定格最后一帧，不停会一直计费录空窗口 |

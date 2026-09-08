@@ -254,6 +254,27 @@ def env_vars() -> list:
         # `config.py` happens to default to is how it silently shipped at
         # 640x360 for a demo on a 1080p screen. If these change, they change
         # here, in the deployment, deliberately.
+        # How a window is analysed. Pinned here for the same reason the preview
+        # settings below are: these are a *deployment* decision, and the three
+        # of them are one decision, not three.
+        #
+        #   agentic  -- the model drives its own video tool and picks what to
+        #               look at, instead of us handing it a 1 fps frame ladder
+        #   60s      -- the window it gets to search
+        #   3.8-flash -- agentic needs the video understanding tool;
+        #               gemini-3.5-flash refuses outright (measured), and
+        #               config.validate() now fails the boot rather than
+        #               failing every window one at a time
+        #
+        # Cost, measured 2026-09-08 per five minutes of footage (see the table
+        # in config.py): 60s agentic is 60,600 tokens against 36,920 for 60s
+        # static -- 64% more. Agentic only comes out ahead at 300s windows,
+        # where it is 17,800 against 23,226. This combination is chosen for
+        # what it does to the *verdicts*, not to the bill; if the bill is what
+        # matters, the change is WINDOW_SECONDS=300, not MEDIA_PROCESSING.
+        "MEDIA_PROCESSING": os.environ.get("MEDIA_PROCESSING", "agentic"),
+        "WINDOW_SECONDS": os.environ.get("WINDOW_SECONDS", "60"),
+        "ANALYSIS_MODEL": os.environ.get("ANALYSIS_MODEL", "gemini-3.8-flash"),
         "PREVIEW_WIDTH": os.environ.get("PREVIEW_WIDTH", "1280"),
         "PREVIEW_HEIGHT": os.environ.get("PREVIEW_HEIGHT", "720"),
         "PREVIEW_FPS": os.environ.get("PREVIEW_FPS", "12"),

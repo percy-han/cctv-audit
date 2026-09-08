@@ -20,9 +20,15 @@ up the context -- input size is a function of the window length, not of how
 long the run has been going.
 
 It also replaces one screenshot per ten seconds with the actual footage. At
-1 FPS a 15-second window is 15 frames instead of 1, which is what makes the
+1 FPS a 30-second window is 30 frames instead of 1, which is what makes the
 four "absence" rules (didn't wash hands, didn't rinse, didn't cover, was on the
 phone) answerable at all.
+
+Two ways to spend that window, chosen by MEDIA_PROCESSING: hand the model a
+fixed ladder of frames (`static`), or let it drive its own video tool and
+decide where to look (`agentic`). The trade is measured in `config.py`; the
+short version is that agentic only pays for itself once a window is minutes
+long.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from typing import Optional
 from google.genai.types import (
     Blob,
     GenerateContentConfig,
+    MediaProcessing,
     MediaResolution,
     Part,
     VideoMetadata,
@@ -50,9 +57,23 @@ from .sop import SopRuleSet, load_rules
 
 logger = logging.getLogger("cctv_audit.analyzer")
 
-# Vertex caps inline request payloads around 20 MB. Beyond that the clip has to
-# be uploaded first, which we would rather detect than fail on.
-_MAX_INLINE_BYTES = 18 * 1024 * 1024
+# Two separate caps, both measured against Vertex on 2026-09-08 by walking real
+# MP4s up in size until it refused:
+#
+#   256,000,000 bytes  per inline part  -- "An inline video/mp4 part is N bytes,
+#                                          which exceeds the maximum allowed
+#                                          inline size of 256000000 bytes"
+#   524,288,000 bytes  whole request    -- hit first by a 458 MB clip, because
+#                                          the body is base64 (~4/3 of raw)
+#
+# 240 MB went through; 360 MB did not. So the binding limit is the per-part one,
+# and 250 MB leaves a little room for the prompt and schema alongside the video.
+#
+# This used to say "around 20 MB" and cap at 18. Nobody had measured it, and it
+# was out by more than a factor of ten -- which mattered, because it was the
+# stated reason WINDOW_SECONDS could not go to 300. At 250 MB a five-minute
+# window fits anything under ~6.8 Mbps, i.e. every store camera we have seen.
+_MAX_INLINE_BYTES = 250 * 1000 * 1000
 
 _RESOLUTION_MAP = {
     "low": MediaResolution.MEDIA_RESOLUTION_LOW,
@@ -162,20 +183,25 @@ class VideoAnalyzer:
                 ),
             )
 
-        # A clip recorded at 4x holds 4 video-seconds per file-second, so
-        # sampling it at 4x the nominal rate keeps temporal coverage constant.
-        # Frame count (and therefore token cost) is unchanged: the file is
-        # correspondingly shorter.
-        effective_fps = min(config.analysis_fps * max(clip.time_scale, 1.0), 10.0)
+        video = Part(inline_data=Blob(mime_type="video/mp4", data=data))
+        if config.media_processing == "agentic":
+            # The model drives its own video tool from here: which stretches of
+            # the clip to look at, and at what rate. Setting `fps` alongside it
+            # would be theatre -- measured, agentic ignores both VideoMetadata
+            # and MEDIA_RESOLUTION. Whether that is a good trade depends
+            # entirely on WINDOW_SECONDS; the table in `config.media_processing`
+            # has the numbers.
+            video.media_processing = MediaProcessing.AGENTIC
+        else:
+            # A clip recorded at 4x holds 4 video-seconds per file-second, so
+            # sampling it at 4x the nominal rate keeps temporal coverage
+            # constant. Frame count (and therefore token cost) is unchanged: the
+            # file is correspondingly shorter.
+            effective_fps = min(config.analysis_fps * max(clip.time_scale, 1.0), 10.0)
+            video.video_metadata = VideoMetadata(fps=effective_fps)
 
         # Order matters: with a single video the text part must come after it.
-        contents = [
-            Part(
-                inline_data=Blob(mime_type="video/mp4", data=data),
-                video_metadata=VideoMetadata(fps=effective_fps),
-            ),
-            Part(text=build_prompt(clip, self.rules)),
-        ]
+        contents = [video, Part(text=build_prompt(clip, self.rules))]
 
         generate_config = GenerateContentConfig(
             system_instruction=self.system_instruction,
@@ -194,15 +220,24 @@ class VideoAnalyzer:
         except Exception as exc:
             logger.warning("Window %d analysis failed: %s", clip.index, exc)
             return AnalysisOutcome(
-                clip=clip, result=None, error=str(exc)[:300],
+                clip=clip, result=None, error=self._explain(exc),
                 latency_seconds=time.monotonic() - started,
             )
 
         usage = getattr(response, "usage_metadata", None)
+        # Agentic mode does not count the frames it fetched in
+        # `prompt_token_count`; they land in `tool_use_prompt_token_count`, and
+        # they are most of the bill. A 300s window measured 2,723 in the first
+        # field and 12,671 in the second. Reading only the first would
+        # under-report the run by 85% and, worse, leave MAX_COST_TOKENS
+        # guarding a number that no longer tracks the spend.
         outcome = AnalysisOutcome(
             clip=clip,
             result=None,
-            input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+            input_tokens=(
+                (getattr(usage, "prompt_token_count", 0) or 0)
+                + (getattr(usage, "tool_use_prompt_token_count", 0) or 0)
+            ),
             output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
             latency_seconds=time.monotonic() - started,
         )
@@ -224,6 +259,20 @@ class VideoAnalyzer:
             len(outcome.result.violations), outcome.input_tokens,
         )
         return outcome
+
+    def _explain(self, exc: Exception) -> str:
+        """Turns the one failure a config change can cause into an instruction."""
+        text = str(exc)
+        if "Video understanding tool is not enabled" in text:
+            # What the API says is true and useless: it names neither the
+            # setting that asked for the tool nor a model that has it.
+            return (
+                f"MEDIA_PROCESSING=agentic needs a model with the video understanding "
+                f"tool, and ANALYSIS_MODEL is '{config.analysis_model}', which does not "
+                f"have it. Use gemini-3.8-flash (or 3.7-flash / 3.5-flash-lite), or set "
+                f"MEDIA_PROCESSING=static."
+            )
+        return text[:300]
 
     def _parse(self, text: Optional[str]) -> WindowResult:
         if not text or not text.strip():

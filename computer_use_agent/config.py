@@ -102,6 +102,25 @@ def _env_opt_int(key: str) -> Optional[int]:
         return None
 
 
+# Models measured to refuse `processing="agentic"`. A deny-list rather than an
+# allow-list on purpose: the set of models carrying the video understanding
+# tool changes with every release, and an allow-list would reject a new model
+# that works fine. This one only names what was actually tried and refused,
+# which is the only thing we can honestly claim.
+_NO_VIDEO_TOOL = ("gemini-3.5-flash",)
+
+
+def _lacks_video_tool(model: str) -> bool:
+    name = (model or "").strip().lower()
+    # `-lite` and `-preview-…` are different models that happen to share the
+    # prefix, so match the family exactly plus a version suffix, not any
+    # string that starts with it.
+    return any(
+        name == known or name.startswith(f"{known}-0") or name.startswith(f"{known}-2")
+        for known in _NO_VIDEO_TOOL
+    )
+
+
 @dataclass(frozen=True)
 class Config:
     # ---- Vertex AI ----------------------------------------------------
@@ -168,7 +187,9 @@ class Config:
     # ---- Capture ------------------------------------------------------
     # auto -> probe for a grabbable stream, fall back to screen recording.
     capture_mode: str = field(default_factory=lambda: _env_str("CAPTURE_MODE", "auto").lower())
-    window_seconds: int = field(default_factory=lambda: _env_int("WINDOW_SECONDS", 15))
+    # How much footage one analysis call sees. Pairs with MEDIA_PROCESSING --
+    # see the measurements there; the two are not independent knobs.
+    window_seconds: int = field(default_factory=lambda: _env_int("WINDOW_SECONDS", 30))
     window_overlap_seconds: int = field(default_factory=lambda: _env_int("WINDOW_OVERLAP_SECONDS", 3))
     capture_fps: int = field(default_factory=lambda: _env_int("CAPTURE_FPS", 5))
     stream_probe_seconds: float = field(default_factory=lambda: _env_float("STREAM_PROBE_SECONDS", 12.0))
@@ -191,8 +212,70 @@ class Config:
     media_resolution: str = field(default_factory=lambda: _env_str("MEDIA_RESOLUTION", "low").lower())
     clip_queue_size: int = field(default_factory=lambda: _env_int("CLIP_QUEUE_SIZE", 8))
 
+    # How the model consumes a window.
+    #   static  -- we hand it a fixed ladder of frames at ANALYSIS_FPS
+    #   agentic -- it drives its own video tool, deciding which stretches of the
+    #              window to look at and how closely
+    #
+    # Agentic carries a fixed tool overhead that only amortises over a long
+    # window. Measured 2026-09-08 against the demo recording with the real SOP
+    # instruction and schema on gemini-3.8-flash, total tokens per five minutes
+    # of footage:
+    #
+    #   window   static   agentic
+    #     30s    55,590    93,360
+    #     60s    36,920    60,600
+    #    120s    22,874    31,146
+    #    300s    23,226    17,800   <- the only length where agentic wins
+    #
+    # So this switch and WINDOW_SECONDS have to be chosen together: agentic at
+    # 30s costs 68% more than static and buys nothing, because a 30-second clip
+    # has nothing to search. Pick 30s+static or 300s+agentic, not a mix.
+    #
+    # The table above is measured on the *demo recording*, which is synthetic
+    # and nearly static, and it turns out to flatter agentic badly. On real
+    # shop footage the tool goes looking, and how hard it looks depends on what
+    # is in the frame. Same bilibili video, cloud, 2026-09-08:
+    #
+    #   30s static   job a8c236   54,768 tokens / 327s of footage =  167 tok/s
+    #   60s agentic  job 8c5619  129,982 tokens / 231s of footage =  563 tok/s
+    #
+    # 3.4x, not the 1.6x the synthetic table predicts. And the spend is not
+    # evenly spread: within that one run the four windows cost 47,018 / 63,694
+    # / 9,642 / 9,628 -- the two expensive ones are the two that found
+    # something. That is agentic working as designed, and it means the bill for
+    # a run cannot be estimated from its length the way static's can.
+    #
+    # Latency moves with it: 45-155s per window against static's ~20s. A
+    # 60-second window that takes 155 seconds to judge is not a live feed.
+    #
+    # Two things agentic does *not* honour, both measured, both surprising:
+    # `VideoMetadata` start/end offsets (it re-reads the whole file and reports
+    # on all of it) and MEDIA_RESOLUTION. And it needs a model with the video
+    # understanding tool -- gemini-3.5-flash refuses outright.
+    media_processing: str = field(
+        default_factory=lambda: _env_str("MEDIA_PROCESSING", "static").lower()
+    )
+
     # ---- Budget guards -------------------------------------------------
     max_wall_clock_seconds: int = field(default_factory=lambda: _env_int("MAX_WALL_CLOCK_SECONDS", 3600))
+    # Opening the page -- launch, login, navigate, play, seek, probe -- has this
+    # long, on both the preflight and the audit path. A backstop, not a
+    # schedule: every step inside already has its own timeout and a healthy
+    # open finishes in 3-30 seconds.
+    #
+    # It exists because those per-step timeouts were believed to cover
+    # everything and did not. `page.evaluate` has no timeout, a sourceless
+    # `<video>` returns a `play()` promise that never settles, and job fcfd3c
+    # (2026-09-08, a YouTube link) sat in `probing` with an empty error field
+    # until Agent Runtime killed the request at 900s. GE had already given up at
+    # 602s. The customer saw "working on it" and then nothing, forever.
+    #
+    # 120s is set against what GE can wait for, not against what a page needs:
+    # preflight has to answer inside one GE turn.
+    navigation_budget_seconds: float = field(
+        default_factory=lambda: _env_float("NAVIGATION_BUDGET_SECONDS", 120.0)
+    )
     max_cost_tokens: Optional[int] = field(default_factory=lambda: _env_opt_int("MAX_COST_TOKENS"))
     max_windows: Optional[int] = field(default_factory=lambda: _env_opt_int("MAX_WINDOWS"))
 
@@ -320,6 +403,23 @@ class Config:
             )
         if self.media_resolution not in ("low", "medium", "high"):
             problems.append(f"MEDIA_RESOLUTION must be low|medium|high, got '{self.media_resolution}'.")
+        if self.media_processing not in ("static", "agentic"):
+            problems.append(
+                f"MEDIA_PROCESSING must be static|agentic, got '{self.media_processing}'."
+            )
+        if self.media_processing == "agentic" and _lacks_video_tool(self.analysis_model):
+            # Measured, not assumed: gemini-3.5-flash answers every agentic
+            # request with "Video understanding tool is not enabled for this
+            # model". Nothing catches that until the first window comes back,
+            # by which point the browser is open, the clip is cut, and the run
+            # fails one window at a time for its whole length. A deployment
+            # that cannot analyse anything should say so before it starts.
+            problems.append(
+                f"MEDIA_PROCESSING=agentic needs a model with the video understanding "
+                f"tool; ANALYSIS_MODEL='{self.analysis_model}' refuses it "
+                f"（实测：Video understanding tool is not enabled for this model）。"
+                f"用 gemini-3.8-flash，或者把 MEDIA_PROCESSING 设回 static。"
+            )
         if self.human_gate_mode not in ("auto", "wait", "off"):
             problems.append(f"HUMAN_GATE_MODE must be auto|wait|off, got '{self.human_gate_mode}'.")
         if self.capture_mode not in ("auto", "stream", "screen"):

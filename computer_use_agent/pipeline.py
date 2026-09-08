@@ -46,6 +46,7 @@ from .capture.types import CaptureSource, Clip
 from .config import config
 from .gcp import id_token_for
 from .navigator import ComputerUseFallback, HumanGate, for_target, load_state, platform_of, save_state
+from .navigator.base import NavigationError
 from .store import AuditStore
 
 logger = logging.getLogger("cctv_audit.pipeline")
@@ -259,6 +260,12 @@ class AuditPipeline:
         # Latched, because the watchdog polls every few seconds and the one
         # thing worse than a silent freeze is the same warning forty times.
         self._picture_frozen = False
+        # Whether the *repaint* detector is the one currently complaining, so
+        # that it only ever clears its own warning. The watchdog latches the
+        # same flag for reasons this detector cannot see (a video that ended
+        # while the page still animates), and one detector cancelling the
+        # other's warning is how you end up with a freeze nobody reports.
+        self._repaint_stalled = False
 
     def stop(self, reason: str = "stop requested", kind: str = "requested") -> None:
         """Requests a graceful shutdown from outside the pipeline."""
@@ -293,6 +300,31 @@ class AuditPipeline:
         logger.warning("Dashboard picture frozen: %s", reason)
         self._emit("picture_frozen", {"reason": reason})
 
+    def _note_repaint(self, alive: bool, seconds: float) -> None:
+        """The preview's verdict on whether Chromium is still painting.
+
+        Two detectors, and they fail in different directions, which is why
+        both exist. The watchdog reads the playhead: precise about *why*, but
+        blind whenever the page cannot be read at all. This one counts
+        screencast frames: it knows nothing about the cause, and it is the only
+        thing that can see a page that reports itself as playing while
+        rendering nothing.
+
+        On job a8c236 this was the only detector that fired, and all it did was
+        write a line to the container log while the operator sat looking at a
+        still.
+        """
+        if alive:
+            if self._repaint_stalled:
+                self._repaint_stalled = False
+                self._picture_frozen = False
+            return
+        self._repaint_stalled = True
+        self._note_picture_frozen(
+            f"网页已经 {seconds:.0f} 秒没有重绘了，大屏显示的是一张静止画面"
+            f"（弹窗、暂停或者页面卡住）。稽核不受影响，仍在继续。"
+        )
+
     @contextlib.asynccontextmanager
     async def _browser_session(self, request: AuditRequest, *, live_preview: bool = True):
         """Opens the page, gets it playing, and decides how to capture it.
@@ -319,7 +351,9 @@ class AuditPipeline:
 
         playwright = await async_playwright().start()
         browser = context = preview = None
-        try:
+
+        async def _open() -> _Session:
+            nonlocal browser, context, preview
             browser = await playwright.chromium.launch(headless=config.headless, args=_CHROMIUM_ARGS)
             context = await browser.new_context(
                 viewport={"width": config.screen_width, "height": config.screen_height},
@@ -340,6 +374,7 @@ class AuditPipeline:
                     height=config.preview_height,
                     quality=config.preview_quality,
                     has_viewers=self.has_viewers,
+                    on_repaint=self._note_repaint,
                 )
                 await preview.start()
 
@@ -351,9 +386,17 @@ class AuditPipeline:
             probe.attach()
 
             self._emit("navigating", {"target": request.target, "platform": platform})
+            # One line per step, at INFO because DEBUG does not reach Cloud
+            # Logging. Without these the container went silent between "Opening"
+            # and "capture_mode" -- fifteen minutes of nothing, on a run that
+            # was hung in the third of these four calls, with no way to tell
+            # which one from the outside.
             await navigator.login(page)
+            logger.info("Login step done; opening the target.")
             await navigator.open_target(page, request.target)
+            logger.info("Target open; starting playback.")
             await navigator.ensure_playing(page)
+            logger.info("Playback confirmed advancing.")
 
             # Persist the session now that we are past any challenge, so the
             # next run starts already logged in.
@@ -362,13 +405,14 @@ class AuditPipeline:
 
             if request.start_seconds > 0:
                 await navigator.seek_to(page, request.start_seconds)
+                logger.info("Seeked to %.1fs.", request.start_seconds)
 
             source = await probe.decide(config.capture_mode, wait_seconds=config.stream_probe_seconds)
             probe.detach()
             self.source = source
             self._emit("capture_mode", {"mode": source.mode, "reason": source.reason})
 
-            yield _Session(
+            return _Session(
                 page=page,
                 context=context,
                 navigator=navigator,
@@ -376,7 +420,34 @@ class AuditPipeline:
                 work_dir=work_dir,
                 platform=platform,
             )
+
+        try:
+            # A wall clock around the whole opening sequence, on top of the
+            # per-step timeouts. Those were all in place when job fcfd3c hung
+            # for 900 seconds (2026-09-08, a YouTube link): `page.evaluate` has
+            # no timeout, so the one call nobody had bounded was the one that
+            # hung. A guard that has to name the failing step in advance is a
+            # guard against the failures we already know about.
+            #
+            # It belongs here rather than in `preflight` because `run()` opens
+            # the page the same way, and `run()` is a detached background task
+            # -- a hang there is a job that says `running` and never stops
+            # saying it, with nobody on the other end of a request to notice.
+            budget = config.navigation_budget_seconds
+            try:
+                session = (
+                    await asyncio.wait_for(_open(), timeout=budget) if budget > 0
+                    else await _open()
+                )
+            except asyncio.TimeoutError as exc:
+                raise NavigationError(
+                    f"{budget:.0f} 秒内没能打开这个视频并确认它在播放。"
+                    f"页面可能一直在加载，或者播放器起不来。"
+                    f"如果这是个我们还没适配过的网站，多半需要先做一个适配器。"
+                ) from exc
+            yield session
         finally:
+            cancelled: Optional[BaseException] = None
             for closer in (
                 lambda: preview.aclose() if preview else None,
                 lambda: context.close() if context else None,
@@ -387,10 +458,21 @@ class AuditPipeline:
                     result = closer()
                     if result is not None:
                         await result
+                except asyncio.CancelledError as exc:
+                    # A cancelled cleanup step must not skip the ones after it.
+                    # That is how a Chromium process outlives the request that
+                    # started it, and on a container that survives for hours
+                    # they accumulate. The budget guard around `preflight`
+                    # cancels this scope by design, so this is the normal path
+                    # on a timeout, not an edge case. Re-raised below, once
+                    # everything else has been closed.
+                    cancelled = exc
                 except Exception as exc:
                     logger.debug("Shutdown step failed: %s", exc)
             if not config.keep_clips:
                 shutil.rmtree(work_dir, ignore_errors=True)
+            if cancelled is not None:
+                raise cancelled
 
     async def preflight(self, request: AuditRequest, job_id: str = "preflight") -> PreflightResult:
         """Looks at the video and reports back, without auditing anything.
@@ -402,70 +484,13 @@ class AuditPipeline:
         "your hour is past the end of the recording" are the two answers a
         customer is most likely to get, and they are the two an exception
         would turn into a stack trace with the useful part missing.
+
+        And "we could not tell inside N seconds" is one of them, which is why
+        `_browser_session` has a wall clock: every step in it already had its
+        own timeout when job fcfd3c hung anyway, silently, for 900 seconds.
         """
         try:
-            async with self._browser_session(request, live_preview=False) as session:
-                duration = await self._video_duration(session)
-                cover = await self._cover_frame(session.page, job_id)
-                title = ""
-                with contextlib.suppress(Exception):
-                    title = await session.page.title()
-
-                requested_end = request.end_seconds
-                # One window of slack, matching `_coverage`: the last clip is
-                # cut on a window boundary, so landing seconds short is not a
-                # shortfall and should not be reported to the customer as one.
-                tolerance = max(float(config.window_seconds), 5.0)
-                fmt = Clip.format_offset
-
-                # Unknown duration means live, or a player that will not say.
-                # Neither is a reason to refuse -- it is a reason not to claim.
-                span_available = True
-                problem: Optional[str] = None
-                if duration is not None:
-                    if request.start_seconds >= duration:
-                        # Nothing to audit at all. This is the one preflight
-                        # outcome that has to be ok=False on a page that opened
-                        # fine: starting the audit would produce an empty
-                        # report rather than an error.
-                        return PreflightResult(
-                            ok=False,
-                            target=request.target,
-                            platform=session.platform,
-                            capture_mode=session.source.mode,
-                            capture_reason=session.source.reason,
-                            video_duration_seconds=round(duration, 1),
-                            requested_start_seconds=request.start_seconds,
-                            requested_end_seconds=requested_end,
-                            span_available=False,
-                            problem=(
-                                f"视频只有 {fmt(duration)} 长，"
-                                f"请求的起点 {fmt(request.start_seconds)} 已经超出了视频末尾"
-                            ),
-                            cover_frame=cover,
-                            title=title,
-                        )
-                    if requested_end is not None and requested_end > duration + tolerance:
-                        span_available = False
-                        problem = (
-                            f"视频只有 {fmt(duration)} 长，请求的是到 {fmt(requested_end)}，"
-                            f"最多只能稽核到 {fmt(duration)}"
-                        )
-
-                result = PreflightResult(
-                    ok=True,
-                    target=request.target,
-                    platform=session.platform,
-                    capture_mode=session.source.mode,
-                    capture_reason=session.source.reason,
-                    video_duration_seconds=round(duration, 1) if duration is not None else None,
-                    requested_start_seconds=request.start_seconds,
-                    requested_end_seconds=requested_end,
-                    span_available=span_available,
-                    problem=problem,
-                    cover_frame=cover,
-                    title=title,
-                )
+            result = await self._preflight_inner(request, job_id)
         except Exception as exc:
             logger.exception("Preflight failed for %s: %s", request.target, exc)
             result = PreflightResult(
@@ -475,10 +500,80 @@ class AuditPipeline:
                 requested_start_seconds=request.start_seconds,
                 requested_end_seconds=request.end_seconds,
                 span_available=False,
-                problem=f"打不开这个视频：{str(exc)[:200]}",
+                # 400, not 200. The message that matters here is often two
+                # sentences -- what the site said, then what the fallback tried
+                # -- with the target URL between them, and a bilibili link with
+                # its tracking parameters is 150 characters on its own. At 200
+                # the second sentence was always the one that got cut.
+                problem=f"打不开这个视频：{str(exc)[:400]}",
             )
         self._emit("preflight", result.as_dict())
         return result
+
+    async def _preflight_inner(self, request: AuditRequest, job_id: str) -> PreflightResult:
+        """The body of `preflight`. Raises; the caller turns that into a result."""
+        async with self._browser_session(request, live_preview=False) as session:
+            duration = await self._video_duration(session)
+            cover = await self._cover_frame(session.page, job_id)
+            title = ""
+            with contextlib.suppress(Exception):
+                title = await session.page.title()
+
+            requested_end = request.end_seconds
+            # One window of slack, matching `_coverage`: the last clip is cut on
+            # a window boundary, so landing seconds short is not a shortfall and
+            # should not be reported to the customer as one.
+            tolerance = max(float(config.window_seconds), 5.0)
+            fmt = Clip.format_offset
+
+            # Unknown duration means live, or a player that will not say.
+            # Neither is a reason to refuse -- it is a reason not to claim.
+            span_available = True
+            problem: Optional[str] = None
+            if duration is not None:
+                if request.start_seconds >= duration:
+                    # Nothing to audit at all. This is the one preflight outcome
+                    # that has to be ok=False on a page that opened fine:
+                    # starting the audit would produce an empty report rather
+                    # than an error.
+                    return PreflightResult(
+                        ok=False,
+                        target=request.target,
+                        platform=session.platform,
+                        capture_mode=session.source.mode,
+                        capture_reason=session.source.reason,
+                        video_duration_seconds=round(duration, 1),
+                        requested_start_seconds=request.start_seconds,
+                        requested_end_seconds=requested_end,
+                        span_available=False,
+                        problem=(
+                            f"视频只有 {fmt(duration)} 长，"
+                            f"请求的起点 {fmt(request.start_seconds)} 已经超出了视频末尾"
+                        ),
+                        cover_frame=cover,
+                        title=title,
+                    )
+                if requested_end is not None and requested_end > duration + tolerance:
+                    span_available = False
+                    problem = (
+                        f"视频只有 {fmt(duration)} 长，请求的是到 {fmt(requested_end)}，"
+                        f"最多只能稽核到 {fmt(duration)}"
+                    )
+
+            return PreflightResult(
+                ok=True,
+                target=request.target,
+                platform=session.platform,
+                capture_mode=session.source.mode,
+                capture_reason=session.source.reason,
+                video_duration_seconds=round(duration, 1) if duration is not None else None,
+                requested_start_seconds=request.start_seconds,
+                requested_end_seconds=requested_end,
+                span_available=span_available,
+                problem=problem,
+                cover_frame=cover,
+                title=title,
+            )
 
     async def _video_duration(self, session: "_Session") -> Optional[float]:
         """How long the recording is, from whichever source can say.
@@ -553,13 +648,27 @@ class AuditPipeline:
             try:
                 await capture_task
             finally:
-                watchdog.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await watchdog
                 # Sentinel per worker so each one exits after draining.
                 for _ in workers:
                     await queue.put(None)
-                await asyncio.gather(*workers, return_exceptions=True)
+                try:
+                    await asyncio.gather(*workers, return_exceptions=True)
+                finally:
+                    # The watchdog outlives capture on purpose. Capture stops
+                    # the moment ffmpeg reaches the requested end, but the
+                    # analysis queue still has a minute of work in it and the
+                    # preview keeps feeding the dashboard for all of it -- it
+                    # is closed with the browser, further down. Cancelling the
+                    # watchdog here used to leave that whole tail with nobody
+                    # minding the page. Measured on job a8c236: capture ended
+                    # at 15:17:47, the screencast fell to 0 fps two seconds
+                    # later when bilibili raised its login nag, and the
+                    # operator watched a frozen still for the remaining 56
+                    # seconds while the windows finished. The audit was
+                    # perfect; the demo was not.
+                    watchdog.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await watchdog
 
         summary = {
             **self.store.summary(),
@@ -837,7 +946,13 @@ class AuditPipeline:
         max_recoveries: float = 3 if page_is_source else math.inf
         last_time: Optional[float] = None
 
-        while not self._stop.is_set():
+        # Not `while not self._stop.is_set()`. Stopping means capture is over,
+        # not that the page stopped mattering: the dashboard is fed from this
+        # page until the browser closes, which is after the last window is
+        # analysed. The caller cancels this task at that point, and that is the
+        # only thing that should end it. What stopping *does* change is that
+        # nothing here may end the run any more -- see `may_stop` below.
+        while True:
             await asyncio.sleep(config.page_watch_seconds)
             try:
                 await navigator.keep_clear(page)
@@ -852,7 +967,20 @@ class AuditPipeline:
 
             # Only Plan B gets to end the run from what the page says. Plan A
             # keeps tending the page below either way.
-            may_stop = page_is_source and config.stop_on_video_end
+            #
+            # And once the run is already stopping, neither of them does. This
+            # is the guard that makes outliving capture safe: the stop path
+            # sets `_footage_ends_at`, and the workers drop every queued clip
+            # that starts after it. During the drain those clips are already
+            # captured and perfectly good, so a page that happens to reach its
+            # end while the queue empties would silently delete the tail of the
+            # audit -- windows the customer asked for, never analysed, reported
+            # as "footage ended". Past capture the watchdog only tends pixels.
+            may_stop = (
+                page_is_source
+                and config.stop_on_video_end
+                and not self._stop.is_set()
+            )
 
             current = state.get("current_time")
             duration = state.get("duration")

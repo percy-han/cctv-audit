@@ -90,9 +90,17 @@ class LivePreview:
         height: int = 360,
         quality: int = 50,
         has_viewers: Optional[Callable[[], Awaitable[bool]]] = None,
+        on_repaint: Optional[Callable[[bool, float], None]] = None,
     ):
         self.page = page
         self.on_frame = on_frame
+        # Called once per report window while frames are being forwarded, with
+        # (is_the_page_still_repainting, window_seconds). This is the only
+        # place that can tell a quiet room from a dead browser -- the pump's
+        # own counters look identical either way -- and until it had somewhere
+        # to go the answer was written to the container log, where the person
+        # actually looking at the frozen picture will never see it.
+        self.on_repaint = on_repaint
         self.fps = max(1, int(fps))
         self.width = max(160, int(width))
         self.height = max(90, int(height))
@@ -308,6 +316,12 @@ class LivePreview:
             ordered[min(len(ordered) - 1, int(len(ordered) * 0.9))],
             ordered[-1], self._cast_frames / window,
         )
+        if self._forwarding and self.on_repaint is not None:
+            try:
+                self.on_repaint(bool(self._cast_frames), window)
+            except Exception as exc:
+                # Diagnostics must never be able to stop the picture.
+                logger.debug("Repaint hook failed: %s", exc)
         if self._forwarding and not self._cast_frames:
             # Chromium only emits on repaint, so a page that has stopped moving
             # produces nothing at all -- while this loop keeps forwarding the

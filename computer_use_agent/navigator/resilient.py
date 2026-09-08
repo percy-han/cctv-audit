@@ -217,7 +217,20 @@ class ResilientNavigator:
 
         logger.warning("Deterministic step failed (%s); handing over to Computer Use.", exc)
         self.used_fallback = True
-        succeeded, detail = await self.fallback.run(page, goal, success_check=success_check)
+        # `run` is documented to report failure by returning False, but it
+        # drives a live page and the page can go under it -- on a bilibili 412
+        # the screenshot it takes to see the page timed out after 30s. That
+        # exception used to fly straight past the composition below, so the
+        # customer was told "Page.screenshot: Timeout 30000ms exceeded" while
+        # the log two lines up already said "错误号: 412 由于触发哔哩哔哩安全风控策略".
+        # Losing the diagnosis we already had is worse than not having one:
+        # it sends the reader after a screenshot bug that does not exist.
+        try:
+            succeeded, detail = await self.fallback.run(
+                page, goal, success_check=success_check
+            )
+        except Exception as fallback_exc:  # noqa: BLE001 -- see above
+            succeeded, detail = False, f"{type(fallback_exc).__name__}: {fallback_exc}"
         if not succeeded:
             raise NavigationError(
                 f"{exc}\n兜底的 Computer Use 也没能恢复：{detail[:300]}"

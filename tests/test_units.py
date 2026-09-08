@@ -24,6 +24,7 @@ Run: .venv/bin/python -m pytest tests/ -q
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -263,6 +264,207 @@ class TestSchema:
                           "confidence": 0.9, "timestamp_in_clip": "01:07"}],
         })
         assert result.findings[0].offset_seconds == 67
+
+
+class TestInlineSizeCap:
+    """Vertex's real inline limits, measured 2026-09-08 by walking MP4s upwards.
+
+    240 MB went through; 360 MB came back with "exceeds the maximum allowed
+    inline size of 256000000 bytes"; 458 MB tripped a second, outer limit --
+    "Request payload size exceeds the limit: 524288000 bytes" -- because the
+    body is base64 and inflates by about a third.
+
+    The constant used to be 18 MB against a guessed "~20 MB", which was the
+    stated reason WINDOW_SECONDS could not go to 300. It was out by more than
+    a factor of ten.
+    """
+
+    def test_the_cap_stays_under_the_limit_vertex_actually_enforces(self):
+        from computer_use_agent.analyzer.video_analyzer import _MAX_INLINE_BYTES
+
+        assert _MAX_INLINE_BYTES <= 256_000_000
+        # And under the whole-request cap once base64 has had its way with it.
+        assert _MAX_INLINE_BYTES * 4 / 3 <= 524_288_000
+
+    def test_a_five_minute_window_fits_a_normal_store_camera(self):
+        from computer_use_agent.analyzer.video_analyzer import _MAX_INLINE_BYTES
+
+        # The number that decides whether WINDOW_SECONDS=300 needs a GCS upload
+        # path: any source below this bitrate does not.
+        mbps = _MAX_INLINE_BYTES * 8 / 300 / 1e6
+        assert mbps > 6.0, f"a 300s window only fits {mbps:.1f} Mbps"
+
+    def test_an_oversized_clip_is_refused_before_the_request_is_built(
+        self, monkeypatch, tmp_path
+    ):
+        from computer_use_agent.analyzer import video_analyzer as va
+
+        # Shrink the cap rather than write 250 MB: the guard is a comparison,
+        # and the real number is pinned by the two tests above.
+        monkeypatch.setattr(va, "_MAX_INLINE_BYTES", 1024)
+        clip_path = tmp_path / "huge.mp4"
+        clip_path.write_bytes(b"\x00" * 1025)
+
+        def explode(*a, **kw):
+            raise AssertionError("the guard let an oversized clip reach Vertex")
+
+        monkeypatch.setattr(va, "generate_content_with_retry", explode)
+        analyzer = VideoAnalyzer(load_rules(CCTV_RULES))
+        outcome = asyncio.run(analyzer.analyze(make_clip(path=clip_path)))
+
+        assert outcome.result is None
+        assert "inline limit" in outcome.error
+
+
+class TestMediaProcessingSwitch:
+    """MEDIA_PROCESSING=agentic hands the window to the model's own video tool.
+
+    Three things about that mode are not guessable from the API surface and
+    were measured on 2026-09-08 against Vertex (project study-project-496907,
+    location=global, gemini-3.8-flash):
+
+      * the frames it fetches are billed to `tool_use_prompt_token_count`, not
+        `prompt_token_count` -- 12,671 vs 2,723 on a 300s window, so reading
+        only the latter under-reports a run by 85% and MAX_COST_TOKENS stops
+        tracking the spend;
+      * it ignores `VideoMetadata`, so setting fps alongside it is a lie to the
+        next reader;
+      * gemini-3.5-flash rejects it outright, with a message that names neither
+        the setting nor a model that works.
+    """
+
+    def _capture_call(self, monkeypatch, tmp_path, processing):
+        import dataclasses
+
+        from computer_use_agent.analyzer import video_analyzer as va
+        from computer_use_agent.config import config as real_config
+
+        clip_path = tmp_path / "w.mp4"
+        clip_path.write_bytes(b"\x00" * 64)
+        monkeypatch.setattr(
+            va, "config", dataclasses.replace(real_config, media_processing=processing)
+        )
+
+        seen = {}
+
+        async def fake_call(*, model, contents, generate_config, **kw):
+            seen["contents"] = contents
+            raise RuntimeError("stop here -- the request is what this test is about")
+
+        monkeypatch.setattr(va, "generate_content_with_retry", fake_call)
+        analyzer = VideoAnalyzer(load_rules(CCTV_RULES))
+        asyncio.run(analyzer.analyze(make_clip(path=clip_path)))
+        return seen["contents"][0]
+
+    def test_static_sends_a_frame_ladder_and_no_agentic_flag(self, monkeypatch, tmp_path):
+        from computer_use_agent.config import config
+
+        part = self._capture_call(monkeypatch, tmp_path, "static")
+        # Not a hardcoded number: a developer's .env may set ANALYSIS_FPS.
+        assert part.video_metadata is not None
+        assert part.video_metadata.fps == config.analysis_fps
+        assert part.media_processing is None
+
+    def test_agentic_sets_the_flag_and_claims_no_fps_it_cannot_honour(
+        self, monkeypatch, tmp_path
+    ):
+        from google.genai.types import MediaProcessing
+
+        part = self._capture_call(monkeypatch, tmp_path, "agentic")
+        assert part.media_processing is MediaProcessing.AGENTIC
+        assert part.video_metadata is None
+
+    def test_the_bill_counts_the_frames_the_tool_fetched(self, monkeypatch, tmp_path):
+        from computer_use_agent.analyzer import video_analyzer as va
+
+        clip_path = tmp_path / "w.mp4"
+        clip_path.write_bytes(b"\x00" * 64)
+
+        class Usage:
+            prompt_token_count = 2723
+            tool_use_prompt_token_count = 12671
+            candidates_token_count = 1018
+
+        class Response:
+            usage_metadata = Usage()
+            text = json.dumps({"scene_summary": "s", "findings": []})
+
+        async def fake_call(**kw):
+            return Response()
+
+        monkeypatch.setattr(va, "generate_content_with_retry", fake_call)
+        analyzer = VideoAnalyzer(load_rules(CCTV_RULES))
+        outcome = asyncio.run(analyzer.analyze(make_clip(path=clip_path)))
+        assert outcome.input_tokens == 2723 + 12671
+
+    def test_the_wrong_model_is_reported_as_the_wrong_model(self):
+        analyzer = VideoAnalyzer(load_rules(CCTV_RULES))
+        message = analyzer._explain(
+            RuntimeError("400 INVALID_ARGUMENT. Video understanding tool is not "
+                         "enabled for this model")
+        )
+        # The raw API text says none of this.
+        assert "MEDIA_PROCESSING" in message
+        assert "gemini-3.8-flash" in message
+
+    def test_an_unknown_mode_is_refused_at_startup(self):
+        import dataclasses
+
+        from computer_use_agent.config import config as real_config
+
+        bad = dataclasses.replace(real_config, media_processing="agentix")
+        assert any("MEDIA_PROCESSING" in p for p in bad.validate())
+
+    def test_agentic_on_a_model_that_refuses_it_is_caught_at_startup(self):
+        # Otherwise the first sign is window 1 coming back empty, with the
+        # browser open and the clips already cut -- and then every window
+        # after it, one at a time, for the whole length of the run.
+        import dataclasses
+
+        from computer_use_agent.config import config as real_config
+
+        bad = dataclasses.replace(
+            real_config, media_processing="agentic",
+            analysis_model="gemini-3.5-flash",
+        )
+        problems = [p for p in bad.validate() if "video understanding" in p]
+        assert len(problems) == 1
+        # Naming the way out matters more than naming the fault: the raw API
+        # message mentions neither the setting nor a model that works.
+        assert "gemini-3.8-flash" in problems[0]
+        assert "ANALYSIS_MODEL" in problems[0]
+
+    def test_the_working_pairing_passes_and_so_does_static_on_either_model(self):
+        import dataclasses
+
+        from computer_use_agent.config import config as real_config
+
+        for processing, model in (
+            ("agentic", "gemini-3.8-flash"),
+            ("static", "gemini-3.5-flash"),
+            ("static", "gemini-3.8-flash"),
+        ):
+            cfg = dataclasses.replace(
+                real_config, media_processing=processing, analysis_model=model,
+            )
+            assert not [p for p in cfg.validate() if "video understanding" in p], (
+                f"{processing} + {model} must not be flagged"
+            )
+
+    def test_a_model_that_merely_shares_the_prefix_is_not_assumed_broken(self):
+        # `gemini-3.5-flash-lite` is a different model, and the blog lists it as
+        # supporting agentic. We have not tried it, and guessing "no" would
+        # block a pairing that may well work -- the deny-list only names what
+        # was actually tried and refused.
+        import dataclasses
+
+        from computer_use_agent.config import config as real_config
+
+        cfg = dataclasses.replace(
+            real_config, media_processing="agentic",
+            analysis_model="gemini-3.5-flash-lite",
+        )
+        assert not [p for p in cfg.validate() if "video understanding" in p]
 
 
 class TestSanitise:
@@ -1199,6 +1401,37 @@ class TestAnUnknownPlatformIsReadNotGuessed:
         from computer_use_agent.navigator.base import diagnose_block
         assert await diagnose_block(FakePage("")) is None
 
+    @pytest.mark.asyncio
+    async def test_a_fallback_that_crashes_does_not_erase_the_diagnosis(self, monkeypatch):
+        """Job 994608, 2026-09-08: the customer was told the wrong thing.
+
+        bilibili answered 412 and the deterministic step said so, in plain
+        language, in the log. Computer Use took over, its own screenshot timed
+        out after 30s, and that exception flew straight past the composition
+        below -- so what came back was "Page.screenshot: Timeout 30000ms
+        exceeded" and nothing about risk control at all. A worse message than
+        none: it points at a screenshot bug that does not exist.
+        """
+        from computer_use_agent.navigator import resilient
+        from computer_use_agent.navigator.base import NavigationError
+
+        async def cannot_tell(_page):
+            return None
+
+        monkeypatch.setattr(resilient, "diagnose_block", cannot_tell)
+
+        class ExplodingFallback:
+            async def run(self, page, goal, success_check=None):
+                raise TimeoutError("Page.screenshot: Timeout 30000ms exceeded")
+
+        navigator = self._navigator(fallback=ExplodingFallback())
+        with pytest.raises(NavigationError) as caught:
+            await navigator.open_target(FakePage(""), "https://vendor/x")
+
+        message = str(caught.value)
+        assert "selector moved" in message, "the original diagnosis must survive"
+        assert "Page.screenshot" in message, "and so must the reason the rescue failed"
+
 
 class TestDeadPageClassification:
     """Gone vs blocked. Only one of them is worth telling the user to fix."""
@@ -1361,6 +1594,149 @@ class TestClosingTheLoginNag:
         assert await navigator._dismiss_overlays(self._Page(modal=False)) == 0
         assert await navigator._dismiss_overlays(self._Page(modal=True)) == 1
         assert await navigator._dismiss_overlays(self._Page(modal=True, hidden=2)) == 3
+
+
+class TestAPageScriptCannotHangTheRun:
+    """Job fcfd3c, 2026-09-08: a YouTube link, 900 seconds of silence.
+
+    The `<video>` on a YouTube page opened headless exists but has no source
+    (`readyState` 0, `networkState` 0), and `play()` on it returns a promise
+    that is never settled -- not resolved, not rejected. `page.evaluate` is the
+    one Playwright call with no timeout of its own, so `await v.play()` inside
+    it waited until Agent Runtime cancelled the request at 900s. GE had already
+    given up at 602s. The job sat in `probing` with an empty error field and no
+    log line naming the step it died in.
+
+    Three things had to be true at once for that, so there are three defences
+    here, and each of these tests kills exactly one of them.
+    """
+
+    class _NeverSettles:
+        """A page whose scripts return a promise the page keeps forever."""
+
+        def __init__(self):
+            self.calls = 0
+
+        async def evaluate(self, _script, *_args):
+            self.calls += 1
+            await asyncio.Event().wait()  # exactly as unresolvable as v.play()
+
+    @pytest.mark.asyncio
+    async def test_a_script_that_never_returns_becomes_an_ordinary_failure(self):
+        from computer_use_agent.browser_actions import PageScriptTimeout, evaluate_bounded
+
+        with pytest.raises(PageScriptTimeout) as caught:
+            await asyncio.wait_for(
+                evaluate_bounded(self._NeverSettles(), "() => 1", budget=0.05,
+                                 what="start playback"),
+                timeout=5,
+            )
+        # The message has to name the step: "a page script hung" sends whoever
+        # reads it back through the whole preflight to find out which one.
+        assert "start playback" in str(caught.value)
+
+    @pytest.mark.asyncio
+    async def test_the_playback_script_does_not_await_the_page(self):
+        # The bounded wait above is the backstop. This is the actual fix: the
+        # promise is fired and dropped, because whether playback started is
+        # answered by watching the playhead, not by the promise.
+        from computer_use_agent.navigator.bilibili import BilibiliNavigator
+
+        scripts = []
+
+        class _Page:
+            async def evaluate(self, script, *args):
+                scripts.append(script)
+                return True
+
+            def locator(self, _selector):
+                raise AssertionError("should not need a click")
+
+        navigator = BilibiliNavigator()
+        page = _Page()
+        # Playback is advancing, so ensure_playing returns after one script.
+        navigator._is_advancing = lambda _p: _true()
+
+        async def _true():
+            return True
+
+        await navigator.ensure_playing(page)
+        assert len(scripts) == 1
+        assert "await" not in scripts[0], (
+            "awaiting a page promise inside evaluate is what hung job fcfd3c")
+        assert ".catch(" in scripts[0], "the rejection still has to be swallowed"
+
+    @pytest.mark.asyncio
+    async def test_no_source_is_reported_as_no_source(self):
+        # A screenshot of this cannot tell it apart from an ad or a slow load:
+        # all three are a black rectangle. `diagnose_block` would say "nothing
+        # is blocking it", which is true and useless. The element's own state
+        # is the only place the answer exists.
+        from computer_use_agent.navigator.bilibili import BilibiliNavigator
+
+        class _Page:
+            async def evaluate(self, _script, *_args):
+                return {"src": "", "ready_state": 0, "network_state": 0}
+
+        why = await BilibiliNavigator()._why_not_playing(_Page())
+        assert "没有加载任何视频源" in why
+        assert "适配器" in why, "the reader needs to know what to do next"
+
+    @pytest.mark.asyncio
+    async def test_opening_the_page_gives_up_inside_its_budget(self, monkeypatch):
+        # Every step already had a timeout when fcfd3c hung. So the guard that
+        # matters is the one that does not depend on having guessed which step
+        # hangs -- a wall clock around the whole opening sequence.
+        import dataclasses
+
+        from computer_use_agent import pipeline as pipeline_mod
+        from computer_use_agent.config import config
+        from computer_use_agent.intent import AuditRequest
+        from computer_use_agent.pipeline import AuditPipeline
+
+        monkeypatch.setattr(
+            pipeline_mod, "config",
+            dataclasses.replace(config, navigation_budget_seconds=0.05),
+        )
+
+        class _Playwright:
+            class chromium:
+                @staticmethod
+                async def launch(**_kwargs):
+                    await asyncio.Event().wait()  # hangs where fcfd3c hung
+
+            async def stop(self):
+                return None
+
+        class _Starter:
+            async def start(self):
+                return _Playwright()
+
+        monkeypatch.setattr(pipeline_mod, "async_playwright", lambda: _Starter())
+
+        pipeline = AuditPipeline.__new__(AuditPipeline)
+        pipeline._emit = lambda *_a, **_k: None
+        pipeline.on_preview_frame = None
+        pipeline.gate = None
+        pipeline.has_viewers = None
+
+        request = AuditRequest(target="https://example.invalid/watch", start_seconds=0)
+        result = await asyncio.wait_for(pipeline.preflight(request), timeout=5)
+        assert result.ok is False
+        assert "秒内没能打开" in result.problem
+
+    @pytest.mark.asyncio
+    async def test_the_audit_path_is_guarded_too_not_just_preflight(self):
+        # `run()` opens the page the same way, and `start_audit` runs it as a
+        # detached background task. A hang there is a job that reads `running`
+        # forever with no request left for anyone to notice dying.
+        import inspect
+
+        from computer_use_agent.pipeline import AuditPipeline
+
+        source = inspect.getsource(AuditPipeline._browser_session)
+        assert "navigation_budget_seconds" in source, (
+            "the guard has to sit in the shared opening path, not in preflight")
 
 
 class TestChallengeDetection:
@@ -1679,10 +2055,18 @@ class TestStallRecovery:
         ))
         runner = self._Runner()
         navigator.runner = runner
-        await asyncio.wait_for(
-            runner._watch_page(object(), navigator, page_is_source=page_is_source),
-            timeout=10,
+        # Cancelled from outside, because that is now the only thing that ends
+        # it: the loop deliberately outlives `_stop` so the page stays minded
+        # while the analysis queue drains. `_stop` still marks "capture is
+        # over", so waiting on it puts the assertions at the same point in the
+        # run they were checked at before.
+        task = asyncio.create_task(
+            runner._watch_page(object(), navigator, page_is_source=page_is_source)
         )
+        await asyncio.wait_for(runner._stop.wait(), timeout=10)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
         return runner
 
     @pytest.mark.asyncio
@@ -1806,6 +2190,144 @@ class TestPlanAPageWatchdog:
         assert [p["reason"] for e, p in runner.events if e == "picture_frozen"] == [
             "网页里的视频已播完，画面停在最后一帧（稽核不受影响，仍在继续）"
         ]
+
+
+class TestWatchdogOutlivesCapture:
+    """Capture stopping is not the page stopping mattering.
+
+    Job a8c236, on bilibili: ffmpeg reached the requested end at 15:17:47 and
+    the watchdog was cancelled with it, but twelve windows were still in the
+    analysis queue and the preview feeds the dashboard until the browser
+    closes. The login nag came up two seconds later, nobody swept it, and the
+    operator watched a frozen still for the remaining 56 seconds while the
+    numbers ticked up. The audit was perfect and the demo was not.
+    """
+
+    _Runner = TestStallRecovery._Runner
+    _Navigator = TestStallRecovery._Navigator
+
+    class _StoppedNavigator(TestStallRecovery._Navigator):
+        """Sets `_stop` early, the way `[budget_stop]` does, then keeps going.
+
+        `ends_after_stop` moves the page to its final frame only once capture
+        is over, which is the ordering that matters: a page that had already
+        ended before then is a genuine end-of-footage and should be treated as
+        one.
+        """
+
+        ends_after_stop = False
+
+        async def read_playback_state(self, page):
+            self._left -= 1
+            if self._left == 55:  # capture reaches the requested end
+                self.runner._stop.set()
+                if self.ends_after_stop:
+                    self.current = self.duration - 0.5
+            return {"ended": False, "current_time": self.current,
+                    "duration": self.duration}
+
+    async def _drain(self, navigator, monkeypatch, *, page_is_source, polls=60):
+        import types as _types
+
+        from computer_use_agent import pipeline as pipeline_module
+
+        monkeypatch.setattr(pipeline_module, "config", _types.SimpleNamespace(
+            page_watch_seconds=0.001, stop_on_video_end=True,
+        ))
+        runner = self._Runner()
+        navigator.runner = runner
+        task = asyncio.create_task(
+            runner._watch_page(object(), navigator, page_is_source=page_is_source)
+        )
+        for _ in range(2000):  # bounded spin, not a sleep: the poll is 1ms
+            if navigator._left <= navigator._budget - polls or task.done():
+                break
+            await asyncio.sleep(0.001)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return runner
+
+    @pytest.mark.asyncio
+    async def test_it_keeps_minding_the_page_after_capture_ends(self, monkeypatch):
+        navigator = self._StoppedNavigator(79.0, 300.0, recoverable=False, budget=60)
+        navigator._budget = 60
+        runner = await self._drain(navigator, monkeypatch, page_is_source=False)
+
+        # The old loop was `while not self._stop.is_set()`, so it exited on the
+        # first poll after capture stopped. Both of these were 0 for the whole
+        # drain, which is exactly how long the dashboard stayed frozen.
+        assert runner._stop.is_set()
+        assert navigator.cleanings > 20, "overlays must still be swept"
+        assert navigator.plays > 3, "and the player still nudged"
+
+    @pytest.mark.asyncio
+    async def test_it_can_no_longer_end_the_run_once_capture_is_over(self, monkeypatch):
+        # Plan B, page at its end, during the drain. Left ungated, this sets
+        # `_footage_ends_at`, and every clip already sitting in the queue whose
+        # offset is past it gets dropped unanalysed -- windows the customer
+        # asked for and paid to capture, reported as "footage ended".
+        navigator = self._StoppedNavigator(150.0, 300.0, recoverable=False, budget=60)
+        navigator._budget = 60
+        navigator.ends_after_stop = True
+        runner = await self._drain(navigator, monkeypatch, page_is_source=True)
+
+        assert runner._footage_ends_at is None
+        assert "video_ended" not in runner.kinds()
+        assert runner._stop_kind is None  # the budget stopped it, not the page
+
+
+class TestRepaintDetectorReachesTheDashboard:
+    """The pixel detector knew, and only told the container log.
+
+    On a8c236 the playhead detector never fired -- the watchdog was already
+    gone -- and the only thing that noticed was the preview pump counting zero
+    screencast frames. It wrote a warning to stdout. The person looking at the
+    frozen picture was in a browser.
+    """
+
+    def _runner(self):
+        from computer_use_agent.pipeline import AuditPipeline
+
+        runner = TestStallRecovery._Runner()
+        runner._repaint_stalled = False
+        runner._note_repaint = AuditPipeline._note_repaint.__get__(runner)
+        return runner
+
+    def test_a_page_that_stopped_repainting_is_announced(self):
+        runner = self._runner()
+        runner._note_repaint(False, 15.0)
+
+        frozen = [p for e, p in runner.events if e == "picture_frozen"]
+        assert len(frozen) == 1
+        assert "15 秒没有重绘" in frozen[0]["reason"]
+        assert "稽核不受影响" in frozen[0]["reason"]
+
+    def test_it_says_it_once_however_long_the_freeze_lasts(self):
+        runner = self._runner()
+        for _ in range(4):  # a8c236 reported four windows in a row
+            runner._note_repaint(False, 15.0)
+
+        assert runner.kinds().count("picture_frozen") == 1
+
+    def test_the_notice_re_arms_when_frames_come_back(self):
+        runner = self._runner()
+        runner._note_repaint(False, 15.0)
+        runner._note_repaint(True, 15.0)
+        runner._note_repaint(False, 15.0)
+
+        assert runner.kinds().count("picture_frozen") == 2
+
+    def test_it_does_not_clear_a_warning_it_did_not_raise(self):
+        # The watchdog latches the same flag for something this detector cannot
+        # see: a video that ended while the page still animates. Frames are
+        # arriving, so `alive` is True -- and clearing on that would silently
+        # cancel the other detector's warning.
+        runner = self._runner()
+        runner._note_picture_frozen("网页里的视频已播完，画面停在最后一帧")
+        runner._note_repaint(True, 15.0)
+
+        assert runner._picture_frozen is True
 
 
 class TestCpuProbe:

@@ -175,8 +175,12 @@ def main() -> None:
     # with a trailing backslash, does not survive being copied out of a
     # terminal into another one: the continuation is lost, the assignment runs
     # as its own command, and the engine gets patched with the default tag.
+    # `.venv/bin/python`, not `python`: the system interpreter on the dev VM
+    # has none of this project's dependencies, so the bare form printed here
+    # until 2026-09-09 died on `ModuleNotFoundError: google.auth`. A hint that
+    # has to be edited before it runs is a hint nobody trusts.
     print("\nMove the engine onto it with (one line):\n"
-          f"  ENGINE_IMAGE={tag} python deploy/agent_runtime/deploy.py "
+          f"  ENGINE_IMAGE={tag} .venv/bin/python deploy/agent_runtime/deploy.py "
           "update-image <engine-id>")
 
 

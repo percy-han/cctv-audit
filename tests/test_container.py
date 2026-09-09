@@ -940,3 +940,20 @@ class TestTheDeployCommandFitsOnOneLine:
         # The message has to mention the wrapping, because that is how someone
         # gets here.
         assert "one line" in str(caught.value)
+
+    def test_the_printed_hint_uses_the_venv_interpreter(self):
+        """The hint is meant to be pasted, so it has to run as printed.
+
+        It said bare `python` until 2026-09-09, and the system interpreter on
+        the dev VM has none of this project's dependencies -- pasting it got
+        `ModuleNotFoundError: google.auth`. Same failure mode as the wrapped
+        line above: the command that gets copied is not the command that runs.
+        """
+        import pathlib
+
+        source = (pathlib.Path(__file__).resolve().parents[1]
+                  / "deploy" / "agent_runtime" / "build_image.py"
+                  ).read_text(encoding="utf-8")
+        hint = next(ln for ln in source.splitlines()
+                    if "ENGINE_IMAGE={tag}" in ln)
+        assert ".venv/bin/python" in hint

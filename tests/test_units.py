@@ -3087,6 +3087,20 @@ class TestWhichProjectWeAreIn:
         # project here would write a customer's audit into someone else's.
         assert self._project(monkeypatch) == ""
 
+    def test_the_complaint_about_a_missing_project_is_still_pinned(self):
+        """`tests/conftest.py` sets a project for the whole suite, so nothing
+        else exercises this branch any more -- and the branch matters: without
+        it a misconfigured deployment builds a pipeline and fails somewhere far
+        away instead of at startup. Read conftest for why the suite needs the
+        variable at all; this is the coverage that move would otherwise cost.
+        """
+        from computer_use_agent.config import Config
+
+        problems = Config(gcp_project="").validate()
+        assert any("GOOGLE_CLOUD_PROJECT" in p for p in problems)
+        assert not [p for p in Config(gcp_project="p").validate()
+                    if "GOOGLE_CLOUD_PROJECT" in p]
+
 
 class TestNotBillingSomeoneElsesProject:
     """Agent Runtime's credentials arrive with a quota project already on them.

@@ -800,6 +800,58 @@ turn done session=9776... in 2.31s (first sentence 0.84s, 3 sentences)
 
 单测 470 → 478。
 
+## 十二·十一、这套测试有 11 个是靠一个没进 git 的文件才过的（2026-09-09）
+
+代码推到第二个远端（`percy-han/cctv-audit`）之后跑了一次 `./check.sh --deep`，
+它把仓库重新 clone 出来、在 clone 里跑测试——**11 failed / 468 passed**，
+全是同一句：
+
+```
+ValueError: Invalid configuration:
+  - GOOGLE_CLOUD_PROJECT is not set (no default is assumed).
+```
+
+这 11 个测试会真的构造 `AuditPipeline`，而 `__init__`（`pipeline.py:268`）
+先跑 `config.validate()`，没有项目就拒绝建。项目从哪来的？
+`computer_use_agent/.env`——**那个文件在 `.gitignore` 里**，因为它是某个人的本机设置。
+
+所以这套测试在这台机器上全绿、在任何别的地方全红，**而且这样过了六天没人发现**。
+原因是 `./check.sh` 在**当前目录**跑测试，`.env` 就在旁边；只有 `--deep` 是站在
+「别人 clone 下来会看到什么」的位置上看的。它头一回真派上用场，就是在代码
+第一次离开这台机器的那天。
+
+### 修法：`tests/conftest.py` 里钉死一个假项目号
+
+```python
+os.environ["GCP_PROJECT"] = "test-project-not-a-real-one"
+```
+
+三个刻意的选择：
+
+- **写死一个假值，不是去读 `.env` 补默认。** 一套跑起来结果取决于谁的 `.env`
+  的测试，测的不是代码，是那台笔记本。值明显是假的，将来真有测试去连云，
+  这个 id 就是让它当场暴露的东西。
+- **`GCP_PROJECT` 而不是 `GOOGLE_CLOUD_PROJECT`。** 前者在 `config.py:144` 里优先，
+  所以它能盖过一份设了后者的 `.env`。
+- **import 期赋值，不是 fixture。** `config` 是模块级的冻结 dataclass
+  （`config.py:439` 的 `config = Config()`），collection 一 import
+  `computer_use_agent.config` 就定型了，fixture 那时候已经晚了。
+
+代价是「缺项目就报错」这条分支再没别的测试走得到，所以在
+`TestWhichProjectWeAreIn` 里补了一条直接断言 `Config(gcp_project="").validate()`
+的——那条分支是有用的：没有它，配错的部署会先建起 pipeline，
+然后在很远的地方以别的面目炸掉。
+
+### 顺带：`--deep` 自己也在喊狼来了
+
+同一次运行还报了 `Only in deploy/demovideo: assets`。那不是差异，
+是 `check.sh` 里手抄的一份 `.gitignore` 副本**没跟上**——
+`deploy/demovideo/assets/` 后来加进 `.gitignore` 了，那份副本没加。
+现在排除列表**在运行时从 `.gitignore` 读出来**，不再有第二份。
+一个每次都误报的检查，等于没有这个检查。
+
+单测 478 → 480。
+
 ## 十三、和 `main` 现在那版的关系（看 PR 先看这节）
 
 **`main` 已经不是 `29cbb38` 了。** 它上面有三个我们分支上没有的提交，

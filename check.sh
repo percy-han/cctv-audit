@@ -242,12 +242,24 @@ if [ "$DEEP" = true ]; then
     if git clone -q --branch "$BRANCH" --single-branch "$REMOTE_URL" "$CLONE_DIR/repo" 2>/dev/null; then
         echo "ok"
 
+        # The exclude list is read out of .gitignore, not typed out here. It
+        # used to be a hand-kept copy and it fell behind exactly the way a
+        # second copy does: `deploy/demovideo/assets/` was added to .gitignore
+        # and not here, so every --deep run reported a difference that was not
+        # one. A check that cries wolf on every run stops being read.
+        #
+        # `diff --exclude` matches basenames, so a pattern like
+        # `computer_use_agent/.env` contributes `.env` -- which is what the old
+        # hand-written list said too.
+        DIFF_EXCLUDES=(--exclude=.git)
+        while IFS= read -r pattern; do
+            case "$pattern" in ''|'#'*) continue ;; esac
+            pattern="${pattern%/}"
+            DIFF_EXCLUDES+=("--exclude=${pattern##*/}")
+        done < "$DIR/.gitignore"
+
         printf '  Comparing against this directory ... '
-        DIFF_OUT="$(diff -r --brief \
-            --exclude=.git --exclude=.venv --exclude=.work --exclude=auth \
-            --exclude=__pycache__ --exclude=.pytest_cache --exclude=.adk \
-            --exclude=checkpoints --exclude=.env --exclude=.DS_Store \
-            --exclude=BRD.md --exclude=SDD.md \
+        DIFF_OUT="$(diff -r --brief "${DIFF_EXCLUDES[@]}" \
             "$CLONE_DIR/repo" "$DIR" 2>&1)"
         if [ -z "$DIFF_OUT" ]; then
             echo "✅ identical"

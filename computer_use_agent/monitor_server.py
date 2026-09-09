@@ -56,6 +56,11 @@ def _blank_state() -> Dict[str, Any]:
         "status": "IDLE",
         "prompt": "",
         "capture_settings": "",
+        # Which models this run is on. Empty until a run says so, and the page
+        # then shows the platform name alone rather than the model name of
+        # whatever ran last -- an idle dashboard naming a model is exactly the
+        # lie the hardcoded footer used to tell.
+        "engine": "",
         "current_url": "about:blank",
         "last_action": "",
         "last_action_args": {},

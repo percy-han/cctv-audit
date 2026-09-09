@@ -31,9 +31,14 @@ Then:
 
     python deploy/agent_runtime/deploy.py create
     python deploy/agent_runtime/deploy.py poll <operation-name>
-    python deploy/agent_runtime/deploy.py update-image <engine-name>
+    ENGINE_IMAGE=v9 python deploy/agent_runtime/deploy.py update-image <engine-id>
     python deploy/agent_runtime/deploy.py list
-    python deploy/agent_runtime/deploy.py delete <engine-name>
+    python deploy/agent_runtime/deploy.py delete <engine-id>
+
+`ENGINE_IMAGE` takes a bare tag or a full image reference; `<engine-id>` takes
+the bare id or the full `projects/.../reasoningEngines/<id>`. Both short forms
+exist so the command fits on one line -- a wrapped paste of the long one has
+already patched an engine with the wrong image.
 
 `update-methods` re-declares classMethods as well. Needed whenever a method is
 added: the container knowing about it is not enough, the platform routes on
@@ -69,10 +74,20 @@ PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "study-project-496907")
 # The two locations are unrelated settings: this is where the engine runs, and
 # `config.gcp_location` is which Gemini endpoint the container calls.
 LOCATION = os.environ.get("ENGINE_LOCATION", "us-central1")
-IMAGE = os.environ.get(
-    "ENGINE_IMAGE",
-    f"us-central1-docker.pkg.dev/{PROJECT}/cctv-audit/agent:v4",
-)
+_REPO = f"us-central1-docker.pkg.dev/{PROJECT}/cctv-audit/agent"
+
+# A bare tag is expanded to the repo above; anything with a slash is taken as a
+# full image reference and left alone. The full reference is 68 characters, and
+# a wrapped paste of it has already cost one failed deploy -- the shell ran the
+# assignment as its own command, the variable did not survive, and the engine
+# was patched with the default tag instead of the one that was asked for. The
+# short form fits on a line.
+# `.get(..., "v4")` is not enough: a wrapped paste can leave ENGINE_IMAGE set to
+# the empty string, which would build the tagless `agent:` and fail somewhere
+# far from here.
+IMAGE = os.environ.get("ENGINE_IMAGE") or "v4"
+if "/" not in IMAGE:
+    IMAGE = f"{_REPO}:{IMAGE}"
 DISPLAY_NAME = os.environ.get("ENGINE_DISPLAY_NAME", "cctv-audit-agent")
 
 # The deployment identity. Unset, the platform uses the Reasoning Engine
@@ -458,6 +473,29 @@ if SERVICE_ACCOUNT:
     BODY["spec"]["serviceAccount"] = SERVICE_ACCOUNT
 
 
+def _engine_name(argv_index: int) -> str:
+    """The engine resource name from the command line, short form allowed.
+
+    A bare id is expanded against this file's PROJECT and LOCATION; anything
+    containing a slash is used as given, so a name copied out of `list` still
+    works. Two engines exist in this project, so there is deliberately no
+    default -- guessing which one to patch is not a favour.
+    """
+    try:
+        name = sys.argv[argv_index]
+    except IndexError:
+        raise SystemExit(
+            f"{sys.argv[1]} needs an engine: either the bare id or the full\n"
+            f"projects/.../reasoningEngines/<id>. `list` prints both.\n"
+            "\n"
+            "If you just pasted a long command and got here, check it did not\n"
+            "arrive split across lines -- it has to be one line."
+        )
+    if "/" in name:
+        return name
+    return f"projects/{PROJECT}/locations/{LOCATION}/reasoningEngines/{name}"
+
+
 def main() -> None:
     # No default action. `create` used to be the default, so running this file
     # with no arguments -- the natural way to ask a script what it wants --
@@ -476,7 +514,7 @@ def main() -> None:
             print(f"\nPoll it with:\n  python {sys.argv[0]} poll {name}")
 
     elif action in ("update-image", "update-methods", "update-spec"):
-        name = sys.argv[2]
+        name = _engine_name(2)
         mask = "spec.container_spec.image_uri"
         body: dict = {"spec": {"containerSpec": {"imageUri": IMAGE, "port": 8080}}}
         if action in ("update-methods", "update-spec"):
@@ -503,7 +541,7 @@ def main() -> None:
             print("(none)")
 
     elif action == "delete":
-        print(json.dumps(call("DELETE", f"https://{HOST}/v1/{sys.argv[2]}"), indent=2))
+        print(json.dumps(call("DELETE", f"https://{HOST}/v1/{_engine_name(2)}"), indent=2))
 
     else:
         raise SystemExit(

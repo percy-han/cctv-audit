@@ -131,6 +131,50 @@ async def serve_turn(
     payload: Dict[str, Any],
     service: Optional[AuditService] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
+    """Times `_serve_turn` and says so when the stream ends.
+
+    Only the *arrival* of a turn used to be logged, and that gap cost an
+    afternoon. "Gemini Enterprise answers slowly while a job is running" could
+    not be answered from the logs at all, because nothing recorded when we
+    finished -- it took starting two real audits and timing the turns from
+    outside to establish that this container answers in about three seconds
+    whether or not an audit is running. With this line that is a log query.
+
+    `first` is reported separately from the total because this is a stream and
+    the customer starts reading at the first sentence. A turn that takes twenty
+    seconds to finish but speaks within two is not the same complaint.
+
+    A wrapper rather than a `finally` inside the body: the body has several
+    early returns, and the interesting moment is when the last chunk leaves,
+    which only the thing doing the iterating can see.
+    """
+    began = time.monotonic()
+    said = 0
+    first_at = -1.0
+    try:
+        async for chunk in _serve_turn(payload, service):
+            said += 1
+            if first_at < 0:
+                first_at = time.monotonic() - began
+            yield chunk
+    finally:
+        # `session` so two turns in flight at once stay tellable apart --
+        # container_concurrency is 2.
+        session = ""
+        try:
+            session = read_turn(payload).session_id
+        except Exception:  # pragma: no cover - logging must not break a turn
+            pass
+        logger.info(
+            "turn done session=%s in %.2fs (first sentence %.2fs, %d sentences)",
+            session, time.monotonic() - began, first_at, said,
+        )
+
+
+async def _serve_turn(
+    payload: Dict[str, Any],
+    service: Optional[AuditService] = None,
+) -> AsyncIterator[Dict[str, Any]]:
     """Reads one turn, does one thing, yields one envelope per sentence."""
     svc = service or audit_service()
     turn = read_turn(payload)

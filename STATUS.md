@@ -17,8 +17,8 @@ bilibili 也跑通了，你报的「弹登录框之后大屏不动了」也修�
 
 | 组件 | 位置 | 镜像 / 版本 |
 | :--- | :--- | :--- |
-| 稽核引擎 | Agent Runtime `.../reasoningEngines/6844158066963775488` | **`agent:v25`**（2026-09-09） |
-| 大屏 | Cloud Run `cctv-monitor`（us-central1，`minScale=maxScale=1`） | **`agent:v25`**（revision `cctv-monitor-00009-jjh`） |
+| 稽核引擎 | Agent Runtime `.../reasoningEngines/6844158066963775488` | **`agent:v29`**（2026-09-09） |
+| 大屏 | Cloud Run `cctv-monitor`（us-central1，`minScale=maxScale=1`） | **`agent:v30`**（revision `cctv-monitor-00011-wwc`） |
 | 演示视频 | Cloud Run `cctv-demo-video` | — |
 | GE agent | 应用 `cctv-audit` 下 `agents/16091433261218097511`「门店视频稽核」 | — |
 
@@ -30,6 +30,21 @@ bilibili 也跑通了，你报的「弹登录框之后大屏不动了」也修�
 > 就写着这两个共用一个镜像、「已经飘开过五个版本一次」——现在是第二次。
 > **改了 `monitor.py` 就要单独部一次大屏，改了别的也建议一起部**，
 > 两边同号才看得出线上跑的是哪一份代码。
+>
+> **现在这两个号是不一样的（引擎 v29 / 大屏 v30），这次是故意的**：v30
+> 里只有大屏那半边的改动（违规列表的空状态），引擎那半边一个字节没变，
+> 单为它重部一次引擎要几分钟、还会把已经暖好的 bilibili session 冲掉。
+> **下次动 `server.py` / `pipeline.py` 那类共用代码时，两边一起部回同一个号。**
+
+### 2026-09-09 晚些时候又部的两次
+
+| 版本 | 改了什么 | 怎么验的 |
+| :--- | :--- | :--- |
+| 引擎 `v29` | 页脚不再写死产品名和模型名，改从运行时配置拼 | 跑了一单真实 bilibili（`139c39`），`/api/state` 里 `engine` 拿到整句、`status=COMPLETED`、`finished_at` 有值 |
+| 大屏 `v30` | 违规列表空的时候不再打绿勾，改成「暂无违规记录。」 | 带 ID token 抓线上页面：`未发现不符合` / `✅ 当前抽检片段` / `Vertex AI` / `ADK Web` 四个字符串都没了，`暂无违规记录` 正好两处（静态 + 渲染器） |
+
+**验的是线上服务出来的字节，不是镜像里的文件。** 这次就是这么抓到
+`ADK Web` 还留在一句 HTML 注释里的——注释也会发到浏览器，view-source 看得见。
 
 ### 2026-09-09 这次部署带上去的东西
 

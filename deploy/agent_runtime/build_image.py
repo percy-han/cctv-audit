@@ -171,9 +171,13 @@ def main() -> None:
     if status != "SUCCESS":
         print(f"logs: gcloud builds log {build_id} --region={REGION}", file=sys.stderr)
         raise SystemExit(1)
-    print("\nMove the engine onto it with:\n"
-          f"  ENGINE_IMAGE={image} \\\n"
-          "    python deploy/agent_runtime/deploy.py update-image <engine-name>")
+    # Printed on one line on purpose. The two-line form this used to print,
+    # with a trailing backslash, does not survive being copied out of a
+    # terminal into another one: the continuation is lost, the assignment runs
+    # as its own command, and the engine gets patched with the default tag.
+    print("\nMove the engine onto it with (one line):\n"
+          f"  ENGINE_IMAGE={tag} python deploy/agent_runtime/deploy.py "
+          "update-image <engine-id>")
 
 
 if __name__ == "__main__":

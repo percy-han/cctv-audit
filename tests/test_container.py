@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import pytest
 
@@ -815,3 +816,127 @@ class TestKeepAliveDeploymentSpec:
         # The held probe permanently occupies one. At 1 it would crowd out
         # every Gemini Enterprise turn and they would come back 429.
         assert spec["containerConcurrency"] >= 2
+
+
+class TestATurnSaysHowLongItTook:
+    """The arrival was logged and the departure was not.
+
+    That gap is why "Gemini Enterprise is slow to answer while a job runs"
+    could not be settled from the logs: they showed the question arriving and
+    nothing else, so answering it meant starting two real audits and timing
+    the turns from outside. Measured that way the container takes about three
+    seconds whether or not an audit is running -- but the point of this line
+    is that the next such report is a log query.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_closing_line_carries_the_session_and_the_count(
+        self, service, monkeypatch, caplog
+    ):
+        with caplog.at_level(logging.INFO):
+            await _collect(
+                _payload("在吗"), service,
+                _Decision(action="unclear", question="要看哪个视频？"),
+                monkeypatch,
+            )
+
+        done = [r.getMessage() for r in caplog.records if "turn done" in r.getMessage()]
+        assert len(done) == 1, done
+        # The session id is on the line because container_concurrency is 2 --
+        # two turns in flight interleave, and without it their timings cannot
+        # be told apart.
+        assert "session=s1" in done[0]
+        assert "1 sentences" in done[0]
+        # Both numbers, separately: a stream that speaks in two seconds and
+        # finishes in twenty is not the same complaint as one silent for twenty.
+        assert "first sentence" in done[0]
+
+    @pytest.mark.asyncio
+    async def test_it_is_logged_even_when_the_turn_blows_up(
+        self, service, monkeypatch, caplog
+    ):
+        """A `finally`, not a line at the end of the happy path.
+
+        The turns worth timing include the ones that die. `read_intent`
+        raising something that is not `ModelUnavailable` is the one path that
+        escapes the server's own catch-all, so it is what this uses.
+        """
+        async def explode(_turn):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(server, "read_intent", explode)
+
+        with caplog.at_level(logging.INFO):
+            with pytest.raises(RuntimeError):
+                async for _ in server.serve_turn(_payload("在吗"), service=service):
+                    pass  # pragma: no cover - the first pull raises
+
+        done = [r.getMessage() for r in caplog.records if "turn done" in r.getMessage()]
+        assert len(done) == 1, done
+        # Nothing was said, and the line still has to show that.
+        assert "0 sentences" in done[0]
+
+
+class TestTheDeployCommandFitsOnOneLine:
+    """A wrapped paste of the long form has already cost one bad deploy.
+
+    The shell ran `ENGINE_IMAGE=...` as its own command, the variable did not
+    survive to the next line, and the engine would have been patched with the
+    default tag -- silently, because a tag is a tag. Short forms exist so the
+    command does not wrap, and these pin them.
+    """
+
+    def _module(self):
+        import importlib.util
+        import pathlib
+        import sys
+
+        path = (pathlib.Path(__file__).resolve().parents[1]
+                / "deploy" / "agent_runtime" / "deploy.py")
+        spec = importlib.util.spec_from_file_location("_deploy_paste_test", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["_deploy_paste_test"] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_a_bare_tag_becomes_the_project_repo(self, monkeypatch):
+        monkeypatch.setenv("ENGINE_IMAGE", "v29")
+        assert self._module().IMAGE.endswith("/cctv-audit/agent:v29")
+
+    def test_a_full_reference_is_left_alone(self, monkeypatch):
+        monkeypatch.setenv("ENGINE_IMAGE", "example.dev/x/y:z")
+        assert self._module().IMAGE == "example.dev/x/y:z"
+
+    def test_an_empty_variable_does_not_build_a_tagless_image(self, monkeypatch):
+        # Exactly what a wrapped paste leaves behind. `agent:` would fail far
+        # from here, in the platform, minutes later.
+        monkeypatch.setenv("ENGINE_IMAGE", "")
+        assert not self._module().IMAGE.endswith(":")
+
+    def test_a_bare_engine_id_is_expanded(self, monkeypatch):
+        import sys as _sys
+
+        module = self._module()
+        monkeypatch.setattr(_sys, "argv", ["deploy.py", "update-image", "12345"])
+        assert module._engine_name(2) == (
+            f"projects/{module.PROJECT}/locations/{module.LOCATION}"
+            "/reasoningEngines/12345")
+
+    def test_a_full_engine_name_is_left_alone(self, monkeypatch):
+        import sys as _sys
+
+        module = self._module()
+        full = "projects/p/locations/l/reasoningEngines/9"
+        monkeypatch.setattr(_sys, "argv", ["deploy.py", "update-image", full])
+        assert module._engine_name(2) == full
+
+    def test_a_missing_engine_says_so_instead_of_an_index_error(self, monkeypatch):
+        import sys as _sys
+
+        module = self._module()
+        monkeypatch.setattr(_sys, "argv", ["deploy.py", "update-image"])
+        with pytest.raises(SystemExit) as caught:
+            module._engine_name(2)
+        # The message has to mention the wrapping, because that is how someone
+        # gets here.
+        assert "one line" in str(caught.value)

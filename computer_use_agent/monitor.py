@@ -23,6 +23,8 @@ import time
 from typing import Any, Dict, List, Optional
 import aiohttp
 
+from .config import config
+
 logger = logging.getLogger("cctv_audit.monitor")
 
 # HTML Page for the Frontend Monitor with CCTV Video Audit Right Sidebar
@@ -696,10 +698,21 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="screen-hud">
         <div class="hud-action">
           <span id="hud-action-name" class="hud-action-tag">WAITING</span>
-          <span id="hud-action-desc" class="hud-action-desc">等待在 ADK Web 下发监控视频抽检指令...</span>
+          <!-- This used to name the local development entry point. It still
+               exists, but the customer reading this screen came in through
+               Gemini Enterprise and has never seen it. Naming it here is not
+               worth the confusion, and a name in a comment ships to the
+               browser just the same -- view-source shows it. -->
+          <span id="hud-action-desc" class="hud-action-desc">等待下发监控视频抽检指令...</span>
         </div>
         <div style="color: var(--text-muted); font-size: 0.78rem; font-family: 'JetBrains Mono', monospace;">
-          <span>Google Cloud Vertex AI • Gemini 3.5 Flash Computer Use</span>
+          <!-- Overwritten from the running config by `engine_label()` as soon
+               as a run starts; what is here is only what an idle dashboard
+               shows. No model name belongs in this file: a name written into
+               the page cannot go stale loudly, and a test asserts none is
+               here. The product name has to be written down somewhere, so a
+               test pins this copy of it to `_PLATFORM`. -->
+          <span id="engine-label">Gemini Enterprise Agent Platform</span>
         </div>
       </div>
     </div>
@@ -739,8 +752,12 @@ HTML_PAGE = """<!DOCTYPE html>
           <button class="copy-btn" onclick="copyViolations()">📋 复制清单</button>
         </div>
         <div id="violation-list" style="display: flex; flex-direction: column; gap: 10px;">
+          <!-- No green tick. This is an empty list, not a verdict: at this
+               point the run may not have started, and "nothing here" also
+               covers footage the model said it could not read. The pass/fail
+               call belongs in the report, which now distinguishes the two. -->
           <div class="empty-placeholder">
-            ✅ 暂未发现不符合 SOP 标准的违规项。
+            暂无违规记录。
           </div>
         </div>
       </div>
@@ -940,6 +957,10 @@ HTML_PAGE = """<!DOCTYPE html>
       if (s.capture_settings !== undefined) {
         auditHeadline.textContent = s.capture_settings ? `🎯 ${s.capture_settings}` : '🎯 视频抽检';
       }
+      if (s.engine) {
+        const el = document.getElementById('engine-label');
+        if (el) el.textContent = s.engine;
+      }
       if (s.current_url) urlText.textContent = s.current_url;
       if (s.last_action) {
         hudActionName.textContent = s.last_action;
@@ -1075,7 +1096,11 @@ HTML_PAGE = """<!DOCTYPE html>
       btnTabViol.classList.toggle('has-viol', violCount > 0);
 
       if (violCount === 0) {
-        violationList.innerHTML = '<div class="empty-placeholder">✅ 当前抽检片段未发现不符合 SOP 标准的违规行为。</div>';
+        // Same wording as the static placeholder this overwrites, and it has
+        // to be: this runs on the first state message, so whatever is here is
+        // what anyone actually reads. Keeping the two in sync was missed once
+        // already -- the tick below was edited out of the HTML and left here.
+        violationList.innerHTML = '<div class="empty-placeholder">暂无违规记录。</div>';
         return;
       }
 
@@ -1184,6 +1209,47 @@ _MAX_FRAMES_IN_FLIGHT = _env_int("MAX_FRAMES_IN_FLIGHT", 4)
 # from a log, which is the difference between measuring the problem and
 # guessing at it again.
 _FRAME_REPORT_SECONDS = 15.0
+
+
+# The product this runs on, as Google currently brands it. Checked against the
+# docs on 2026-09-09: they live under `/gemini-enterprise-agent-platform/`, the
+# page title is "Gemini Enterprise Agent Platform", and body text shortens it to
+# "Agent Platform". Agent Runtime -- what we actually deploy to -- is one
+# component under it, alongside Sessions, Memory Bank and Code Execution.
+#
+# "Vertex AI Agent Engine" is the old name and appears nowhere on those pages.
+# It does survive on the wire (`aiplatform.googleapis.com`, `reasoningEngines`),
+# which is why the word is still all over this codebase's comments -- there it
+# means the endpoint, not the product.
+#
+# This is the one string here that no config field can derive, so it is the one
+# that can silently rot. Kept as a lone constant with this note so the next
+# rename is a one-line change, and pinned by a test so it cannot be edited by
+# accident. If you are reading this after another rebrand: re-check the docs
+# URL above rather than trusting this line.
+_PLATFORM = "Gemini Enterprise Agent Platform"
+
+
+def engine_label() -> str:
+    """What is actually judging the footage, for the dashboard footer.
+
+    Read off the config every time rather than written into the page. The
+    hardcoded version said "Google Cloud Vertex AI • Gemini 3.5 Flash Computer
+    Use", and by 2026-09-09 not one word of it was still true: the deployment
+    analyses on `gemini-3.8-flash`, in agentic mode, 60 seconds a window, and
+    the platform itself had been renamed (see `_PLATFORM`). Both halves of that
+    string rotted the same way -- by being typed into a page once.
+
+    Computer Use is named as a fallback because that is what it is. It drives
+    nothing on a normal run -- Playwright does -- and only wakes up when a
+    popup stops playback. On the `gs://` path no browser opens at all, but
+    that path posts no frames either, so nobody reads this line there.
+    """
+    return (
+        f"{_PLATFORM} · 分析 {config.analysis_model}"
+        f"（{config.media_processing}，{config.window_seconds:g} 秒一段）"
+        f" · 导航兜底 {config.nav_model}"
+    )
 
 
 class BrowserMonitorClient:
@@ -1339,6 +1405,12 @@ class BrowserMonitorClient:
                 # What this run is actually configured to do. The banner it
                 # feeds used to be a hardcoded string.
                 "capture_settings": settings,
+                # Same disease, second place: the footer read "Gemini 3.5
+                # Flash Computer Use" from 2026-04 until 2026-09-09, by which
+                # time the deployment analysed on gemini-3.8-flash in agentic
+                # mode. Computed here rather than passed in, so a new call
+                # site cannot forget it and print a stale name instead.
+                "engine": engine_label(),
                 "current_url": "about:blank",
                 "last_action": "启动浏览器",
                 "final_result": "",

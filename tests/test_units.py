@@ -4049,6 +4049,124 @@ class TestDashboardRooms:
             assert "keepme" in ms._rooms
 
 
+class TestTheFooterNamesTheModelThatIsActuallyRunning:
+    """It said "Gemini 3.5 Flash Computer Use" for months, hardcoded.
+
+    Reported 2026-09-09. By then the deployment analysed on gemini-3.8-flash
+    in agentic mode, and Computer Use was a popup fallback that drives nothing
+    on a normal run. A dashboard is a claim about what happened; a wrong model
+    name on it is the cheapest possible way to lose a customer's trust in
+    everything else on the screen.
+    """
+
+    def test_the_label_is_built_from_the_running_config(self, monkeypatch):
+        import dataclasses
+
+        from computer_use_agent import monitor
+        from computer_use_agent.config import config as real_config
+
+        monkeypatch.setattr(monitor, "config", dataclasses.replace(
+            real_config,
+            analysis_model="gemini-9.9-flash",
+            nav_model="gemini-1.1-flash",
+            media_processing="agentic",
+            window_seconds=60,
+        ))
+
+        label = monitor.engine_label()
+        assert "gemini-9.9-flash" in label
+        assert "agentic" in label and "60" in label
+        assert "gemini-1.1-flash" in label
+
+    def test_no_model_name_is_written_into_the_page(self):
+        # The whole failure mode: a name in the HTML cannot go stale loudly.
+        from computer_use_agent.monitor import HTML_PAGE
+
+        assert "Computer Use" not in HTML_PAGE
+        assert "3.5 Flash" not in HTML_PAGE
+        assert 'id="engine-label"' in HTML_PAGE
+
+    def test_the_platform_is_not_called_vertex_ai_anywhere_a_customer_looks(self):
+        """Second half of the same rot, caught a day later.
+
+        My first fix kept "Vertex AI" on the grounds that it was the one true
+        part of the old string. It was not: by 2026-09-09 the docs sit under
+        /gemini-enterprise-agent-platform/ and never say "Vertex AI Agent
+        Engine". The name survives on the wire (aiplatform.googleapis.com),
+        which is why it is still in this codebase's comments -- but the wire
+        name is not what goes on a screen a customer reads.
+        """
+        from computer_use_agent.monitor import HTML_PAGE, engine_label
+
+        assert "Vertex AI" not in HTML_PAGE
+        assert "Vertex AI" not in engine_label()
+
+        # Comments ship too -- view-source shows them, and both times I broke
+        # one of these assertions it was my own comment quoting the stale name
+        # back. Weakening the assertion is the wrong fix; the point is that no
+        # spelling of a dead name survives anywhere in the bytes we serve.
+        assert "ADK Web" not in HTML_PAGE
+
+    def test_the_one_string_no_config_can_derive_is_written_down_once(self):
+        # The product name cannot be read off a config field, so it is the one
+        # thing here that can rot silently again. Two copies exist -- the idle
+        # placeholder in the page and `_PLATFORM` -- and this is what stops
+        # them drifting the way the model name did.
+        from computer_use_agent.monitor import _PLATFORM, HTML_PAGE, engine_label
+
+        assert "Agent Platform" in _PLATFORM
+        assert _PLATFORM in HTML_PAGE
+        assert engine_label().startswith(_PLATFORM)
+
+    def test_an_idle_dashboard_names_no_model_at_all(self):
+        # Better than naming the last run's model to someone who just opened
+        # the page: it is the one string that is true before anything runs.
+        from computer_use_agent.monitor_server import _blank_state
+
+        assert _blank_state()["engine"] == ""
+
+    def test_starting_a_run_tells_the_dashboard_which_models(self):
+        from computer_use_agent.monitor import BrowserMonitorClient
+
+        sent = []
+        client = BrowserMonitorClient.__new__(BrowserMonitorClient)
+        client._segments = []
+        client._fire_and_forget = sent.append
+        client.start_session("稽核 https://x", "单号 abc123")
+
+        data = sent[0]["data"]
+        assert data["engine"]
+        assert "Agent Platform" in data["engine"]
+
+
+class TestAnEmptyViolationListIsNotAPassMark:
+    """The panel used to say "✅ 未发现不符合 SOP 标准的违规行为".
+
+    That is a verdict, and the panel is a list. An empty one also covers the
+    run that has not started and the footage the model said it could not read
+    -- this deployment reported "3 of 10 checks undetermined" on a clip it
+    also passed, and a green tick over that is simply wrong.
+
+    Two copies of the text exist, the static one and the one the renderer
+    writes on the first state message. Editing only the static one -- which is
+    what happened -- changes nothing anybody sees, because the renderer runs
+    within a second of the page opening.
+    """
+
+    def test_no_copy_of_the_placeholder_claims_compliance(self):
+        from computer_use_agent.monitor import HTML_PAGE
+
+        assert "未发现不符合" not in HTML_PAGE
+        assert "✅ 当前抽检片段" not in HTML_PAGE
+
+    def test_both_copies_were_changed_not_just_the_one_that_is_easy_to_find(self):
+        from computer_use_agent.monitor import HTML_PAGE
+
+        # The static placeholder and the renderer's. If a third appears this
+        # fails, which is the right time to notice.
+        assert HTML_PAGE.count("暂无违规记录") == 2
+
+
 class TestAFinishedRunSaysSoInsteadOfShowingNothing:
     """Frames are live-only; nobody who opens the link late gets a picture.
 

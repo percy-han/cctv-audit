@@ -1,0 +1,71 @@
+{
+  "message": {
+    "contextId": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6624820223597720633",
+    "role": "ROLE_AGENT",
+    "content": [
+      {
+        "text": "收到，我先去看一眼这个视频……"
+      },
+      {
+        "text": "找到视频了：第一视角体验霸王茶姬忙碌日常_哔哩哔哩_bilibili\n采集方式：抓流\n分析方式：agentic，60 秒一段\n视频总长：08:39\n要稽核：00:30 - 01:30\n\n单号 `0b581f`。确认开始稽核吗？回「确认」我就开跑。"
+      }
+    ],
+    "metadata": {
+      "dataSourceInfo": {
+        "selectionMode": "SELECTION_MODE_NONE"
+      },
+      "answer": {
+        "diagnosticInfo": {
+          "plannerSteps": [
+            {
+              "createTime": "2026-09-09T07:55:36.130166411Z",
+              "queryStep": {
+                "parts": [
+                  {
+                    "text": "稽核 https://www.bilibili.com/video/BV1MisPzrE29 从 00:30 开始看 1 分钟，标准 chagee-store-v1"
+                  }
+                ]
+              }
+            },
+            {
+              "planStep": {
+                "parts": [
+                  {
+                    "text": "收到，我先去看一眼这个视频……"
+                  }
+                ],
+                "role": "MODEL",
+                "planStepId": "6488100744635919314"
+              },
+              "createTime": "2026-09-09T07:55:39.739812668Z"
+            },
+            {
+              "planStep": {
+                "planStepId": "6488100744635919314",
+                "parts": [
+                  {
+                    "text": "找到视频了：第一视角体验霸王茶姬忙碌日常_哔哩哔哩_bilibili\n采集方式：抓流\n分析方式：agentic，60 秒一段\n视频总长：08:39\n要稽核：00:30 - 01:30\n\n单号 `0b581f`。确认开始稽核吗？回「确认」我就开跑。"
+                  }
+                ],
+                "role": "MODEL"
+              },
+              "createTime": "2026-09-09T07:56:22.061103743Z"
+            }
+          ]
+        },
+        "name": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6624820223597720633/assistAnswers/15095424955647082788",
+        "state": "SUCCEEDED"
+      },
+      "agentInfo": {
+        "agent": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/assistants/default_assistant/agents/16091433261218097511",
+        "displayName": "门店视频稽核"
+      },
+      "assistToken": "M8gKCwj2oYTVBhDlks4BEiQ2YWEwYjhiOC0wMDAwLTJhYWQtOGFjYy01ODI0MjlhZGNhMTg",
+      "sessionInfo": {
+        "turnId": "6624820223597720633_15095424955647083331",
+        "queryId": "15095424955647083512",
+        "session": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6624820223597720633"
+      }
+    }
+  }
+}

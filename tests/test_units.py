@@ -52,6 +52,50 @@ CCTV_RULES = ANALYZER_DIR / "sop_rules.yaml"
 SHIPPED_RULE_FILES = sorted(ANALYZER_DIR.glob("sop_rules*.yaml"))
 
 
+def _confirm_reply(*, capture_mode: str, **preflight) -> str:
+    """What the customer is told when they say 「确认」, as one string.
+
+    Drives `_do_confirm` against a service stub rather than asserting on the
+    source, because the branch under test is about what reaches the customer.
+    """
+    import asyncio as _asyncio
+
+    from computer_use_agent.jobs import Job
+    from computer_use_agent.server import Turn, _do_confirm
+
+    job = Job(
+        user_id="u", job_id="j0b", target="t", state="ready",
+        preflight={"ok": True, "capture_mode": capture_mode, **preflight},
+    )
+
+    class Svc:
+        async def get_status(self, user_id, **kw):
+            return job
+
+        async def start_audit(self, user_id, job_id):
+            return job
+
+    async def go():
+        turn = Turn(user_id="u", session_id="s", text="确认")
+        said = [
+            e["events"][0]["content"]["parts"][0]["text"]
+            async for e in _do_confirm(Svc(), turn, _plain_say)
+        ]
+        return "\n".join(said)
+
+    return _asyncio.run(go())
+
+
+async def _async_none(*args, **kwargs):
+    """Stands in for a best-effort coroutine that produced nothing."""
+    return None
+
+
+def _plain_say(text: str) -> dict:
+    """The shape `_do_confirm` expects back from `say`, minus the ADK plumbing."""
+    return {"events": [{"content": {"parts": [{"text": text}]}}]}
+
+
 def make_clip(**overrides) -> Clip:
     kwargs = dict(
         index=0, path=Path("/tmp/x.mp4"), start_offset=0.0, end_offset=15.0,
@@ -1894,22 +1938,130 @@ class TestReportIsAboutThisRunOnly:
         assert start == 0.0 and end == pytest.approx(make_clip(index=2).end_offset)
 
 
+class TestZeroViolationsHasTwoOppositeCauses:
+    """"Nobody misbehaved" and "we could not see" must not print the same tick.
+
+    Job `ad345a`, 2026-09-09: the model called the footage
+    「无法判读的无效监控录像」, answered CANNOT_DETERMINE on all five rules and set
+    `visibility_ok=false`. The report said ✅ 未发现违反 SOP 的行为, because the
+    summary only counted rows whose status was VIOLATION.
+
+    Plan C is what turned this from a rounding error into a demo risk: the whole
+    video is one window, so one unreadable window is the entire audit.
+    """
+
+    @staticmethod
+    def _outcome(index, statuses, *, visible=True):
+        from computer_use_agent.analyzer.video_analyzer import AnalysisOutcome
+
+        result = WindowResult.model_validate({
+            "scene_summary": "s",
+            "visibility_ok": visible,
+            "findings": [
+                {"rule_id": f"CHK_{n}", "status": s, "confidence": 0.9,
+                 "severity": "RED_LINE" if s == "VIOLATION" else "NONE"}
+                for n, s in enumerate(statuses)
+            ],
+        })
+        return AnalysisOutcome(clip=make_clip(index=index), result=result)
+
+    async def _summary(self, tmp_path, statuses, *, visible=True):
+        from computer_use_agent.store import AuditStore
+
+        store = AuditStore(records_path=tmp_path / "r.jsonl", evidence_dir=tmp_path / "ev")
+        await store.record(self._outcome(0, statuses, visible=visible))
+        return store.stats.as_dict(), store
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_window_is_counted_not_swallowed(self, tmp_path):
+        summary, _ = await self._summary(
+            tmp_path, ["CANNOT_DETERMINE"] * 5, visible=False)
+
+        assert summary["checks_total"] == 5
+        assert summary["checks_undetermined"] == 5
+        assert summary["windows_unreadable"] == 1
+        assert summary["violations"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_clean_window_reads_as_fully_judged(self, tmp_path):
+        summary, _ = await self._summary(tmp_path, ["COMPLIANT"] * 3)
+
+        assert summary["checks_undetermined"] == 0
+        assert summary["windows_unreadable"] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_report_refuses_to_pass_footage_it_could_not_read(self, tmp_path):
+        from computer_use_agent.agent import CctvAuditAgent
+
+        summary, store = await self._summary(
+            tmp_path, ["CANNOT_DETERMINE"] * 5, visible=False)
+        summary.update({
+            "complete": True, "capture_mode": "file", "elapsed_seconds": 22.5,
+            "stopped_because": "采集结束", "records_path": "x", "evidence_dir": "y",
+            "covered_from_seconds": 0.0, "covered_to_seconds": 1200.0,
+        })
+        report = CctvAuditAgent._report(summary, store)
+
+        assert "✅" not in report, "a tick on footage nobody could read is the bug"
+        assert "没有得出结论" in report
+        assert "全部无法判定" in report
+
+    @pytest.mark.asyncio
+    async def test_a_partly_readable_run_says_how_much_was_missed(self, tmp_path):
+        from computer_use_agent.agent import CctvAuditAgent
+
+        summary, store = await self._summary(
+            tmp_path, ["COMPLIANT", "COMPLIANT", "CANNOT_DETERMINE"])
+        summary.update({
+            "complete": True, "capture_mode": "stream", "elapsed_seconds": 30.0,
+            "stopped_because": "采集结束", "records_path": "x", "evidence_dir": "y",
+            "covered_from_seconds": 0.0, "covered_to_seconds": 60.0,
+        })
+        report = CctvAuditAgent._report(summary, store)
+
+        # Not the blanket refusal -- two rules really were judged.
+        assert "没有得出结论" not in report
+        assert "1 项没能判读" in report
+        assert "3 项检查中 1 项无法判定" in report
+
+    @pytest.mark.asyncio
+    async def test_a_genuinely_clean_run_still_gets_its_tick(self, tmp_path):
+        from computer_use_agent.agent import CctvAuditAgent
+
+        summary, store = await self._summary(tmp_path, ["COMPLIANT"] * 4)
+        summary.update({
+            "complete": True, "capture_mode": "stream", "elapsed_seconds": 30.0,
+            "stopped_because": "采集结束", "records_path": "x", "evidence_dir": "y",
+            "covered_from_seconds": 0.0, "covered_to_seconds": 60.0,
+        })
+        report = CctvAuditAgent._report(summary, store)
+
+        # The point is not to make every report hedge. A run that read
+        # everything and found nothing is a pass, and must still read as one.
+        assert "✅ 未发现违反 SOP 的行为（全部规则均已判读）" in report
+        assert "4 项检查全部判读完成" in report
+
+
 class TestCoverageHonesty:
     """A run that delivered 48s of a requested 10 minutes must say so."""
 
     class _Stub:
         """Just the attributes `_coverage` reads."""
 
-        def __init__(self, span, stop_kind=None, footage_ends_at=None):
+        def __init__(self, span, stop_kind=None, footage_ends_at=None, source=None):
             self._stop_kind = stop_kind
             self._footage_ends_at = footage_ends_at
+            self.source = source
             self.store = type("S", (), {"covered_span": lambda _self: span})()
 
-    def _coverage(self, span, *, start=120.0, duration=600.0, stop_kind=None, ends_at=None):
+    def _coverage(
+        self, span, *, start=120.0, duration=600.0, stop_kind=None, ends_at=None, source=None
+    ):
         from computer_use_agent.pipeline import AuditPipeline, AuditRequest
 
         request = AuditRequest(target="x", start_seconds=start, duration_seconds=duration)
-        return AuditPipeline._coverage(self._Stub(span, stop_kind, ends_at), request)
+        return AuditPipeline._coverage(
+            self._Stub(span, stop_kind, ends_at, source), request)
 
     def test_a_video_shorter_than_the_request_is_not_an_early_stop(self):
         # Asking for ten minutes from 14:40 of a 15:15 video is the caller's
@@ -3895,3 +4047,695 @@ class TestDashboardRooms:
             for i in range(ms._MAX_ROOMS + 20):
                 client.post("/api/event", json={"type": "frame", "frame": "x", "job_id": f"j{i}"})
             assert "keepme" in ms._rooms
+
+
+class TestAFinishedRunSaysSoInsteadOfShowingNothing:
+    """Frames are live-only; nobody who opens the link late gets a picture.
+
+    Job 781c96 (2026-09-09) was reported as "the dashboard's video is gone".
+    The dashboard logs showed the WebSocket connecting 55 seconds *after* the
+    audit had ended, so there was nothing left to stream and never had been --
+    no viewer means no frame is ever pushed, and none are stored. The results
+    were there because those come from room state. Only the video panel was
+    blank, with nothing on it to say why, which reads as a broken dashboard.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_rooms(self):
+        from computer_use_agent import monitor_server as ms
+
+        ms._rooms.clear()
+        ms._rooms[""] = ms.Room("")
+        yield
+        ms._rooms.clear()
+        ms._rooms[""] = ms.Room("")
+
+    @staticmethod
+    def _client():
+        from fastapi.testclient import TestClient
+        from computer_use_agent.monitor_server import app
+
+        return TestClient(app)
+
+    @staticmethod
+    def _state(client, job, status):
+        client.post("/api/event",
+                    json={"type": "state", "data": {"status": status}, "job_id": job})
+        return client.get("/api/state", params={"job": job}).json()
+
+    def test_a_running_audit_has_no_end_time(self):
+        client = self._client()
+        assert self._state(client, "alice", "RUNNING")["finished_at"] is None
+
+    def test_the_moment_a_run_ends_is_stamped_server_side(self):
+        # Stamped here rather than sent by the container so it cannot disagree
+        # with the clock the page formats it against.
+        client = self._client()
+        self._state(client, "alice", "RUNNING")
+        assert self._state(client, "alice", "COMPLETED")["finished_at"] > 0
+
+    def test_a_run_that_died_is_stamped_too(self):
+        client = self._client()
+        self._state(client, "alice", "RUNNING")
+        assert self._state(client, "alice", "ERROR")["finished_at"] > 0
+
+    def test_the_stamp_is_the_first_end_not_the_last_message(self):
+        # Progress payloads keep arriving after `finish_session` (a segment's
+        # own `state` event, say). Re-stamping on each would walk the time
+        # forward and the page would say the audit ended later than it did.
+        client = self._client()
+        self._state(client, "alice", "RUNNING")
+        first = self._state(client, "alice", "COMPLETED")["finished_at"]
+        again = self._state(client, "alice", "COMPLETED")["finished_at"]
+        assert again == first
+
+    def test_starting_again_in_the_same_room_clears_the_stamp(self):
+        # Local `adk web` reuses a room when the same job id runs twice.
+        client = self._client()
+        self._state(client, "alice", "COMPLETED")
+        assert self._state(client, "alice", "RUNNING")["finished_at"] is None
+
+    def test_a_viewer_who_arrives_after_the_end_is_told_it_ended(self):
+        # The whole point: the state pushed on connect has to carry both the
+        # status and the moment, or the page has nothing to build the line from.
+        client = self._client()
+        self._state(client, "alice", "RUNNING")
+        self._state(client, "alice", "COMPLETED")
+        with client.websocket_connect("/ws?job=alice") as late:
+            joined = late.receive_json()
+        assert joined["type"] == "state"
+        assert joined["data"]["status"] == "COMPLETED"
+        assert joined["data"]["finished_at"] > 0
+
+
+class TestTheAnalysisModeIsInTheAnswer:
+    """The customer is asked to confirm one of two very different runs.
+
+    agentic on 60s windows costs 3.4x static and takes 45-155s a window
+    against ~20s. Both are called "开始稽核". On 2026-09-09 the only way to
+    find out which one a deployment was on was to read the engine's env vars
+    out of the API -- the logs said nothing and the token counts of static/60s
+    and agentic/60s are close enough to be ambiguous.
+    """
+
+    def test_preflight_carries_the_mode_even_on_the_paths_that_forget_things(self):
+        # `default_factory`, not a value passed at each construction site:
+        # preflight returns from four places and one of them is the error path.
+        from computer_use_agent.pipeline import PreflightResult
+
+        out = PreflightResult(ok=False, target="x", platform="p").as_dict()
+        assert out["analysis_mode"] in ("static", "agentic")
+        assert out["analysis_window_seconds"] > 0
+        assert out["analysis_model"]
+
+    def test_the_line_names_the_mode_and_editorialises_about_neither(self):
+        # It used to read "agentic（模型自己挑该看的地方，慢一些、贵一些，看得细）".
+        # That is our opinion of the setting sitting in a line the customer
+        # reads as a statement of fact about their job, so it is gone: the
+        # mode's name and the shape of the run, nothing else.
+        from computer_use_agent.server import _describe_analysis
+
+        agentic = _describe_analysis({"analysis_mode": "agentic", "analysis_window_seconds": 60})
+        assert agentic == "分析方式：agentic，60 秒一段"
+
+        static = _describe_analysis({"analysis_mode": "static", "analysis_window_seconds": 30})
+        assert static == "分析方式：static，30 秒一段"
+
+        for word in ("慢", "贵", "快", "便宜", "看得细"):
+            assert word not in agentic and word not in static
+
+    def test_an_unrecognised_mode_says_nothing_rather_than_guessing(self):
+        # A job whose preflight predates this field falls back to the running
+        # config; a mode nobody knows must not be labelled as one we do.
+        from computer_use_agent.server import _describe_analysis
+
+        assert _describe_analysis({"analysis_mode": "something-new"}) == ""
+
+    def test_it_appears_next_to_the_capture_mode_the_customer_already_gets(self):
+        from computer_use_agent.jobs import Job
+        from computer_use_agent.server import _describe_preflight
+
+        job = Job(
+            user_id="u", job_id="abc123", target="t", state="ready",
+            preflight={
+                "ok": True, "capture_mode": "stream", "video_duration_seconds": 600.0,
+                "analysis_mode": "agentic", "analysis_window_seconds": 60,
+            },
+        )
+        text = _describe_preflight(job)
+        assert "采集方式：抓流" in text
+        assert "分析方式：agentic" in text
+        assert "视频总长：10:00" in text
+        # Order matters only in that the two "方式" lines belong together.
+        assert text.index("采集方式") < text.index("分析方式") < text.index("视频总长")
+
+
+class TestReadingAVideoStraightOutOfABucket:
+    """Plan C: the customer's own SOP recordings are files, not web pages."""
+
+    def test_a_normal_uri_splits_into_bucket_and_object(self):
+        from computer_use_agent.capture.gcs_video import parse_gs_uri
+
+        assert parse_gs_uri("gs://my-bucket/sop/开店流程.mp4") == ("my-bucket", "sop/开店流程.mp4")
+        assert parse_gs_uri("  gs://my-bucket/a.mp4  ") == ("my-bucket", "a.mp4")
+
+    def test_the_three_things_people_actually_paste_wrong_each_say_what_is_wrong(self):
+        from computer_use_agent.capture.gcs_video import BadGcsUri, parse_gs_uri
+
+        with pytest.raises(BadGcsUri, match="没给文件"):
+            parse_gs_uri("gs://my-bucket")
+        with pytest.raises(BadGcsUri, match="目录"):
+            parse_gs_uri("gs://my-bucket/sop/")
+        with pytest.raises(BadGcsUri, match="不是一个 gs:// 地址"):
+            parse_gs_uri("https://example.com/a.mp4")
+
+    def test_a_bucket_name_that_could_escape_the_bucket_position_is_refused(self):
+        # This string is about to be interpolated into a URL. A name carrying
+        # an `@` or a `:` out of the host position is not a naming-rules
+        # quibble, it is a request to a different server.
+        from computer_use_agent.capture.gcs_video import BadGcsUri, parse_gs_uri
+
+        for bad in ("gs://evil.com:8080/x.mp4", "gs://a@b/x.mp4", "gs://-lead/x.mp4"):
+            with pytest.raises(BadGcsUri):
+                parse_gs_uri(bad)
+
+    def test_the_object_name_is_encoded_slashes_and_all(self):
+        # `?alt=media` on the JSON API, because the object name has to be
+        # percent-encoded including its slashes. A raw `?` or `#` in a name
+        # would otherwise truncate the path and fetch a different object.
+        from computer_use_agent.capture.gcs_video import media_url
+
+        url = media_url("b", "sop/v1 final#2.mp4")
+        assert "/o/sop%2Fv1%20final%232.mp4?alt=media" in url
+        assert url.count("?") == 1
+
+    def test_routing_is_loose_so_a_broken_gs_uri_still_gets_a_gs_complaint(self):
+        # If `gs://bucket` fell through to the browser it would come back
+        # "打不开这个视频", which sends the customer looking in the wrong place.
+        from computer_use_agent.capture.gcs_video import is_gcs_uri
+
+        assert is_gcs_uri("gs://bucket")
+        assert is_gcs_uri("GS://Bucket/a.mp4")
+        assert not is_gcs_uri("https://example.com/a.mp4")
+        assert not is_gcs_uri("")
+
+    def test_the_first_failure_anyone_hits_names_the_grant_that_is_missing(self):
+        # "Server returned 403 Forbidden" is not actionable until somebody says
+        # whose permission it is -- and on day one it is always ours, on their
+        # bucket.
+        from computer_use_agent.capture.gcs_video import _explain
+
+        assert "storage.objectViewer" in _explain("b", "o.mp4", "Server returned 403 Forbidden")
+        assert "不存在" in _explain("b", "o.mp4", "Server returned 404 Not Found")
+        assert "gs://b/o.mp4" in _explain("b", "o.mp4", "whatever else")
+
+    def test_a_live_or_unfinalised_recording_reports_no_duration_rather_than_a_fake_one(self):
+        from computer_use_agent.capture.gcs_video import _duration_of
+
+        assert _duration_of({"format": {"duration": "180.5"}}) == 180.5
+        assert _duration_of({"format": {"duration": "inf"}}) is None
+        assert _duration_of({"format": {"duration": "0"}}) is None
+        assert _duration_of({"format": {}}) is None
+        assert _duration_of({}) is None
+
+
+class TestTheEntranceRecognisesABucketPath:
+    """A `gs://` URI pasted into GE has to survive the whole way in."""
+
+    def test_from_fields_accepts_it(self):
+        from computer_use_agent.intent import from_fields
+
+        intent = from_fields("gs://bucket/sop/a.mp4", start="05:00", end="07:00")
+        assert intent.request.target == "gs://bucket/sop/a.mp4"
+        assert intent.request.start_seconds == 300.0
+        assert intent.request.duration_seconds == 120.0
+
+    def test_a_half_written_uri_is_caught_while_the_customer_is_still_here(self):
+        # Not a minute later inside a preflight, by which point the reply is
+        # "打不开这个视频" and they have moved on.
+        from computer_use_agent.capture.gcs_video import BadGcsUri
+        from computer_use_agent.intent import from_fields
+
+        with pytest.raises(BadGcsUri):
+            from_fields("gs://bucket", start=0)
+
+    def test_a_shop_name_is_still_not_an_address(self):
+        from computer_use_agent.intent import from_fields
+
+        with pytest.raises(ValueError, match="不是一个视频地址"):
+            from_fields("望京店", start=0)
+
+    def test_the_offline_fallback_finds_one_in_a_sentence(self):
+        from computer_use_agent.intent import _URL_RE
+
+        found = _URL_RE.search("按 chagee-store-v1 稽核 gs://chagee-sop/开店/v3.mp4，从 05:00 看 2 分钟")
+        assert found and found.group(0) == "gs://chagee-sop/开店/v3.mp4"
+
+    def test_a_chinese_comma_ends_the_address_even_with_no_space_after_it(self):
+        # `\S+` used to swallow "，从" and hand the whole thing to ffprobe as
+        # the address. Not a gs:// problem -- http has always had it, it just
+        # took writing a Chinese-punctuation test to notice.
+        from computer_use_agent.intent import _URL_RE
+
+        for text, want in [
+            ("稽核 https://x.com/v?a=1，从 05:00 开始", "https://x.com/v?a=1"),
+            ("地址是 gs://b/a.mp4。谢谢", "gs://b/a.mp4"),
+            ("（gs://b/a.mp4）这个", "gs://b/a.mp4"),
+        ]:
+            assert _URL_RE.search(text).group(0) == want
+
+    def test_a_path_may_still_contain_chinese_characters(self):
+        # Only the punctuation is excluded. Object names like `开店/v3.mp4` are
+        # exactly what the customer's bucket looks like.
+        from computer_use_agent.intent import _URL_RE
+
+        assert _URL_RE.search("gs://桶/开店流程/第三版.mp4").group(0) == "gs://桶/开店流程/第三版.mp4"
+
+    def test_the_ge_reply_calls_it_what_it_is(self):
+        from computer_use_agent.jobs import Job
+        from computer_use_agent.server import _describe_preflight
+
+        job = Job(
+            user_id="u", job_id="j", target="gs://b/a.mp4", state="ready",
+            preflight={"ok": True, "capture_mode": "file", "title": "sop/a.mp4"},
+        )
+        text = _describe_preflight(job)
+        assert "采集方式：直接读文件（GCS）" in text
+        assert "sop/a.mp4" in text
+
+
+class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
+    """No slicing, no ffmpeg, no bytes: one clip that is the whole recording.
+
+    This replaced a design that cut the object into 60s windows with ffmpeg.
+    The measurement that killed it: under `MEDIA_PROCESSING=agentic`, the
+    `video_metadata` start/end offsets are silently ignored. Asked for
+    240s-300s of a 5-minute file with a burnt-in timecode, static answered
+    "起=00:09:00 止=00:09:59" and agentic answered "起=00:05:00 止=00:10:00" --
+    the whole file, no error, no warning. So windowing a `gs://` object under
+    agentic is not merely wasteful, it is wrong.
+    """
+
+    def _source(self, mode="file", uri="gs://b/a.mp4", duration=None):
+        from computer_use_agent.capture.types import CaptureSource
+
+        return CaptureSource(
+            mode=mode, url="https://storage.googleapis.com/x?alt=media",
+            headers={"Authorization": "Bearer t"}, reason="r",
+            object_uri=uri, duration_seconds=duration,
+        )
+
+    def _producer(self, tmp_path, *, start=300.0, duration=120.0, source=None):
+        from computer_use_agent.pipeline import AuditPipeline, AuditRequest
+
+        request = AuditRequest(
+            target="gs://b/a.mp4", start_seconds=start, duration_seconds=duration)
+        return asyncio.run(AuditPipeline._build_producer(
+            AuditPipeline(), source or self._source(duration=600.0),
+            None, None, tmp_path, request))
+
+    def test_the_whole_object_becomes_exactly_one_clip(self, tmp_path):
+        from computer_use_agent.capture.gcs_video import WholeFileProducer
+
+        producer = self._producer(tmp_path)
+        assert isinstance(producer, WholeFileProducer)
+
+        async def collect():
+            return [c async for c in producer.clips()]
+
+        clips = asyncio.run(collect())
+        assert len(clips) == 1
+        clip = clips[0]
+        assert clip.uri == "gs://b/a.mp4" and clip.path is None
+        assert clip.whole_video is True and clip.is_remote is True
+        assert clip.start_offset == 0.0 and clip.end_offset == 600.0
+        assert clip.source_mode == "file"
+
+    def test_the_requested_time_range_is_ignored_rather_than_half_honoured(self, tmp_path):
+        # Asked for 05:00 + 2 minutes; the clip still starts at zero and runs
+        # the whole 10 minutes. Half-honouring it -- seeking to 300 and letting
+        # the model read to the end anyway -- is the outcome the probe showed
+        # agentic silently producing, and it reports timestamps against the
+        # wrong origin.
+        clip = asyncio.run(self._one(self._producer(tmp_path, start=300.0, duration=120.0)))
+        assert (clip.start_offset, clip.end_offset) == (0.0, 600.0)
+
+    @staticmethod
+    async def _one(producer):
+        async for clip in producer.clips():
+            return clip
+        raise AssertionError("producer yielded nothing")
+
+    def test_an_unknown_duration_reads_as_zero_rather_than_a_plausible_guess(self, tmp_path):
+        # ffprobe could not say. `00:00 - 00:00` looks wrong, which is the
+        # point: a made-up length would look right and be wrong.
+        clip = asyncio.run(self._one(self._producer(tmp_path, source=self._source())))
+        assert clip.end_offset == 0.0 and clip.time_range == "00:00 - 00:00"
+        # ...and the findings from it keep their own timestamps rather than
+        # being clamped to a length nobody knows.
+        assert clip.clip_ts_to_video_offset(412.0) == 412.0
+
+    def test_it_refuses_a_source_that_has_no_object_address(self):
+        # `url` is the HTTPS endpoint ffmpeg reads; Vertex only accepts `gs://`.
+        # Building on a source that has the first and not the second would send
+        # a signed URL to the model and fail deep inside the request.
+        from computer_use_agent.capture.gcs_video import WholeFileProducer
+
+        with pytest.raises(ValueError):
+            WholeFileProducer(self._source(uri=None))
+        with pytest.raises(ValueError):
+            WholeFileProducer(self._source(mode="stream"))
+
+    def test_closing_it_is_a_no_op_because_nothing_was_opened(self, tmp_path):
+        # The pipeline closes its producer unconditionally; a missing `aclose`
+        # would be an AttributeError in a `finally` block, i.e. at the one
+        # moment the real error is being reported.
+        assert asyncio.run(self._producer(tmp_path).aclose()) is None
+
+    def test_building_it_never_reaches_for_the_page(self, tmp_path):
+        # page and navigator are None on this path. Anything in `_build_producer`
+        # that touched them would be an AttributeError at the top of every run.
+        assert self._producer(tmp_path, start=0.0, duration=None) is not None
+
+    def test_a_whole_file_run_is_not_measured_against_a_span_it_ignored(self):
+        # The customer asked for 02:00 + 10 minutes and got the whole 30. The
+        # old arithmetic would have called that "只覆盖到 30:00，请求的是到
+        # 12:00" -- understating a run that watched everything, which is the
+        # one direction a coverage report must never err in.
+        from computer_use_agent.capture.types import CaptureSource
+
+        source = CaptureSource(mode="file", url="u", object_uri="gs://b/a.mp4",
+                               duration_seconds=1800.0)
+        out = TestCoverageHonesty()._coverage(
+            (0.0, 1800.0), start=120.0, duration=600.0, source=source)
+        assert out["complete"] is True and out["incomplete_reason"] is None
+        assert out["whole_video"] is True
+        assert out["requested_start_seconds"] == 0.0
+        assert out["requested_end_seconds"] == 1800.0
+
+        # Nothing analysed is still nothing analysed.
+        empty = TestCoverageHonesty()._coverage(None, source=source)
+        assert empty["complete"] is False and empty["incomplete_reason"]
+
+    def test_preflight_does_not_reject_a_start_it_is_about_to_ignore(self):
+        # 05:00 of a 3-minute file. On Plan A that is "nothing to audit"; here
+        # the whole three minutes are going to the model regardless, so
+        # refusing the job would refuse a perfectly auditable video.
+        from computer_use_agent.capture.types import CaptureSource
+        from computer_use_agent.pipeline import AuditPipeline, AuditRequest, _Session
+
+        session = _Session(
+            page=None, context=None, navigator=None,
+            source=CaptureSource(mode="file", url="u", object_uri="gs://b/a.mp4",
+                                 reason="r", duration_seconds=180.0),
+            work_dir=Path("/tmp"), platform="gcs",
+        )
+
+        pipeline = AuditPipeline()
+
+        @contextlib.asynccontextmanager
+        async def fake_session(request, *, live_preview=True):
+            yield session
+
+        pipeline._capture_session = fake_session
+        pipeline._cover_frame = _async_none
+        request = AuditRequest(target="gs://b/a.mp4", start_seconds=300.0,
+                               duration_seconds=120.0)
+        result = asyncio.run(pipeline._preflight_inner(request, "job1"))
+        assert result.ok is True and result.span_available is True
+        assert result.problem is None
+        assert result.analysis_scope == "whole_file"
+        assert result.as_dict()["analysis_scope"] == "whole_file"
+
+    def test_the_scope_of_every_other_plan_is_still_windows(self):
+        from computer_use_agent.pipeline import PreflightResult
+
+        for mode in ("stream", "screen", ""):
+            assert PreflightResult(
+                ok=True, target="t", platform="p", capture_mode=mode
+            ).analysis_scope == "windows"
+
+    def test_the_reply_says_whole_video_and_admits_the_span_is_unused(self):
+        # The customer typed a time range and is about to get a report that
+        # covers everything. Being told that before confirming is the whole
+        # difference between "it ignored me" and "it told me".
+        from computer_use_agent.jobs import Job
+        from computer_use_agent.server import _describe_preflight
+
+        job = Job(
+            user_id="u", job_id="j", target="gs://b/a.mp4", state="ready",
+            preflight={
+                "ok": True, "capture_mode": "file", "analysis_scope": "whole_file",
+                "analysis_mode": "agentic", "analysis_window_seconds": 60,
+                "requested_start_seconds": 300.0, "requested_end_seconds": 420.0,
+            },
+        )
+        text = _describe_preflight(job)
+        assert "要稽核：整段视频，从头看到尾" in text
+        assert "05:00 - 07:00 这次用不上" in text
+        assert "分析方式：agentic，整段视频一次看完，不切片" in text
+        assert "秒一段" not in text
+
+    def test_a_job_that_predates_the_scope_field_is_read_off_its_capture_mode(self):
+        # Firestore still holds jobs whose preflight has no `analysis_scope`.
+        # Answering "windows" for one of them would promise a live picture that
+        # this path has never had.
+        from computer_use_agent.server import _is_whole_file
+
+        assert _is_whole_file({"capture_mode": "file"}) is True
+        assert _is_whole_file({"capture_mode": "stream"}) is False
+        assert _is_whole_file({"analysis_scope": "windows", "capture_mode": "file"}) is False
+
+    def test_evidence_stills_come_out_of_the_object_when_there_is_no_local_clip(
+            self, tmp_path, monkeypatch):
+        # A remote clip has `path=None`. Handing that to ffmpeg is a TypeError
+        # inside the one code path whose job is to preserve proof.
+        from computer_use_agent import store as store_mod
+
+        asked = {}
+
+        async def fake_frame_at(uri, offset, out_path, **kw):
+            asked["uri"], asked["offset"] = uri, offset
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(b"JPEG")
+            return True
+
+        async def never(*a, **kw):
+            pytest.fail("a remote clip has no file for ffmpeg to cut")
+
+        monkeypatch.setattr(store_mod.gcs_video, "frame_at", fake_frame_at)
+        monkeypatch.setattr(store_mod, "extract_frame", never)
+
+        store = store_mod.AuditStore(
+            records_path=tmp_path / "r.jsonl", evidence_dir=tmp_path / "ev")
+        finding = type("F", (), {"rule_id": "R1", "offset_seconds": 91.0})()
+        locator = asyncio.run(store._save_evidence(self._remote_clip(), finding))
+        assert locator and asked["uri"] == "gs://b/a.mp4" and asked["offset"] == 91.0
+
+    def _remote_clip(self):
+        from computer_use_agent.capture.types import Clip
+
+        return Clip(index=0, path=None, uri="gs://b/a.mp4", start_offset=0.0,
+                    end_offset=600.0, wall_clock_start=0.0, source_mode="file",
+                    whole_video=True)
+
+    def test_a_clip_says_where_the_footage_is_exactly_once(self):
+        # Both would mean two answers to "where are the bytes" and the readers
+        # disagree about which wins; neither means the analyser has nothing to
+        # send and finds out one request too late.
+        from computer_use_agent.capture.types import Clip
+
+        for kwargs in ({}, {"path": Path("/tmp/a.mp4"), "uri": "gs://b/a.mp4"}):
+            with pytest.raises(ValueError):
+                Clip(index=0, start_offset=0.0, end_offset=1.0,
+                     wall_clock_start=0.0, source_mode="file",
+                     path=kwargs.get("path"), uri=kwargs.get("uri"))
+
+        local = Clip(index=0, path=Path("/tmp/a.mp4"), start_offset=0.0, end_offset=1.0,
+                     wall_clock_start=0.0, source_mode="stream")
+        assert local.is_remote is False and local.whole_video is False
+
+
+class TestTheModelIsGivenTheAddressNotTheBytes:
+    """The remote branch of `analyze`, and the prompt that goes with it."""
+
+    def _clip(self, uri="gs://b/a.mp4", **kw):
+        from computer_use_agent.capture.types import Clip
+
+        return Clip(index=0, path=None, uri=uri, start_offset=0.0, end_offset=600.0,
+                    wall_clock_start=0.0, source_mode="file",
+                    whole_video=kw.pop("whole_video", True), **kw)
+
+    def test_the_mime_type_follows_the_object_name(self):
+        from computer_use_agent.capture.gcs_video import mime_for
+
+        assert mime_for("gs://b/a.mp4") == "video/mp4"
+        assert mime_for("gs://b/A.MOV") == "video/quicktime"
+        # Something we have no entry for still has to be a video type: an
+        # unlabelled part is rejected, and mp4 is what the customer's
+        # recordings have been every time so far.
+        assert mime_for("gs://b/a.weirdext").startswith("video/")
+
+    def test_a_remote_clip_is_sent_as_an_address_and_never_read(self, monkeypatch):
+        # The 250 MB inline cap is a property of putting bytes in the request
+        # body, and there are no bytes in this request body -- a 1 GB object
+        # goes through untouched. `read_bytes` fails the test rather than
+        # returning something, because a Plan C run that reads the file works
+        # right up until the file is bigger than the instance's memory.
+        from computer_use_agent.analyzer import video_analyzer as va
+
+        monkeypatch.setattr(
+            Path, "read_bytes",
+            lambda self: pytest.fail("Plan C must not read any bytes"))
+
+        sent = {}
+
+        async def fake_call(**kwargs):
+            sent.update(kwargs)
+            raise RuntimeError("the part is all we came for")
+
+        monkeypatch.setattr(va, "generate_content_with_retry", fake_call)
+        analyzer = VideoAnalyzer(load_rules(CCTV_RULES))
+
+        outcome = asyncio.run(analyzer.analyze(self._clip()))
+        # The call was made and blew up on our own exception, not on a size
+        # check and not on a missing file.
+        assert outcome.error and "came for" in outcome.error
+        part = sent["contents"][0]
+        assert part.file_data.file_uri == "gs://b/a.mp4"
+        assert part.file_data.mime_type == "video/mp4"
+        assert part.inline_data is None
+
+    def test_the_whole_video_prompt_asks_for_every_occurrence(self):
+        # A window can hold one instance of a violation; a whole recording can
+        # hold five. "One finding per rule" would report one of them and the
+        # report would read as if the other four never happened.
+        whole = build_prompt(self._clip(), load_rules(CCTV_RULES))
+        assert "整段" in whole and "通篇" in whole
+        assert "每次各输出一条 finding" in whole
+        assert "视频第一帧是 00:00" in whole
+
+    def test_a_window_prompt_still_says_which_window_it_is(self):
+        clip = make_clip(index=3, start_offset=180.0, end_offset=240.0)
+        windowed = build_prompt(clip, load_rules(CCTV_RULES))
+        assert "03:00 - 04:00" in windowed and "通篇" not in windowed
+
+
+class TestAPagelessRunDoesNotPretendToHaveAPage:
+    """`_Session.page` is None on Plan C, and four things used to assume it was not."""
+
+    def _session(self, page=None, duration=None):
+        from computer_use_agent.capture.types import CaptureSource
+        from computer_use_agent.pipeline import _Session
+
+        return _Session(
+            page=page, context=None, navigator=None,
+            source=CaptureSource(mode="file", url="u", duration_seconds=duration),
+            work_dir=Path("/tmp"), platform="gcs",
+        )
+
+    def test_has_page_is_the_check_every_consumer_makes(self):
+        assert self._session().has_page is False
+        assert self._session(page=object()).has_page is True
+
+    def test_an_unreadable_duration_is_none_not_an_attribute_error(self):
+        # Catching the AttributeError from a None navigator would produce the
+        # same None, and would also hide a real navigator fault behind it.
+        from computer_use_agent.pipeline import AuditPipeline
+
+        pipeline = AuditPipeline()
+        assert asyncio.run(pipeline._video_duration(self._session())) is None
+        assert asyncio.run(pipeline._video_duration(self._session(duration=180.0))) == 180.0
+
+    def test_the_cover_still_comes_from_the_footage_when_there_is_no_screenshot(self, monkeypatch):
+        # The cover is the part of the preflight reply that proves we opened
+        # the customer's video and not somebody else's file. Losing it on Plan C
+        # would be a silent downgrade.
+        from computer_use_agent import pipeline as pipeline_mod
+
+        asked = {}
+
+        async def fake_grab(source, offset, **kw):
+            asked["offset"] = offset
+            return b"JPEGBYTES"
+
+        class Sink:
+            async def put(self, key, data, content_type):
+                asked["key"], asked["data"] = key, data
+                return f"gs://art/{key}"
+
+        monkeypatch.setattr(pipeline_mod.gcs_video, "grab_frame", fake_grab)
+        monkeypatch.setattr(pipeline_mod, "artifact_sink", lambda: Sink())
+
+        out = asyncio.run(pipeline_mod.AuditPipeline()._cover_frame(
+            self._session(), "job1", 300.0))
+        assert out == "gs://art/job1/cover.jpg"
+        assert asked["offset"] == 300.0 and asked["data"] == b"JPEGBYTES"
+
+    def test_a_missing_cover_is_still_only_a_missing_cover(self, monkeypatch):
+        from computer_use_agent import pipeline as pipeline_mod
+
+        async def fake_grab(source, offset, **kw):
+            return None
+
+        monkeypatch.setattr(pipeline_mod.gcs_video, "grab_frame", fake_grab)
+        assert asyncio.run(pipeline_mod.AuditPipeline()._cover_frame(
+            self._session(), "job1", 0.0)) is None
+
+    def test_nobody_is_pointed_at_a_dashboard_that_has_nothing_to_show(self):
+        # There used to be a "no live picture on this path" announcement on the
+        # dashboard itself. It went together with the link: a Plan C run has no
+        # page, no windows and no preview, so the honest thing is not to offer
+        # the screen at all rather than offer it with an apology attached.
+        assert "实时画面" not in _confirm_reply(capture_mode="file")
+        assert "实时画面" in _confirm_reply(capture_mode="screen")
+
+
+class TestTheSessionForksOnceAndOnlyOnce:
+    """Routing lives in `_capture_session`; nothing downstream branches again."""
+
+    def test_a_gs_target_never_starts_a_browser(self, monkeypatch):
+        from computer_use_agent import pipeline as pipeline_mod
+        from computer_use_agent.capture.types import CaptureSource
+
+        started = []
+        monkeypatch.setattr(
+            pipeline_mod, "async_playwright",
+            lambda: started.append("browser") or (_ for _ in ()).throw(AssertionError()))
+
+        async def fake_open(uri, **kw):
+            return CaptureSource(mode="file", url="u", reason="r", duration_seconds=42.0)
+
+        monkeypatch.setattr(pipeline_mod.gcs_video, "open_source", fake_open)
+
+        async def go():
+            pipeline = pipeline_mod.AuditPipeline()
+            request = pipeline_mod.AuditRequest(target="gs://b/a.mp4")
+            async with pipeline._capture_session(request) as session:
+                return session
+
+        session = asyncio.run(go())
+        assert started == []
+        assert session.has_page is False and session.source.mode == "file"
+        assert session.platform == "gcs"
+
+    def test_an_http_target_still_goes_to_the_browser(self, monkeypatch):
+        from computer_use_agent import pipeline as pipeline_mod
+
+        went = []
+
+        @contextlib.asynccontextmanager
+        async def fake_browser(self, request, *, live_preview=True):
+            went.append(request.target)
+            yield "session"
+
+        monkeypatch.setattr(pipeline_mod.AuditPipeline, "_browser_session", fake_browser)
+
+        async def go():
+            pipeline = pipeline_mod.AuditPipeline()
+            request = pipeline_mod.AuditRequest(target="https://example.com/v")
+            async with pipeline._capture_session(request) as session:
+                return session
+
+        assert asyncio.run(go()) == "session"
+        assert went == ["https://example.com/v"]

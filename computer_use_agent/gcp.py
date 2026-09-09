@@ -156,6 +156,35 @@ def reset_id_token_cache() -> None:
     _id_tokens.clear()
 
 
+def access_token() -> str:
+    """A fresh OAuth access token for this deployment's own identity.
+
+    For handing to something that is not a Google client library -- ffmpeg,
+    which reads `gs://` objects over the storage.googleapis.com REST endpoint
+    with an `Authorization: Bearer` header because it has no idea what a
+    service account is.
+
+    Not cached. `refresh()` is a no-op on a credential that is still valid, and
+    the alternative -- caching a string we cannot invalidate -- is the exact
+    shape of the bug documented above `credentials_without_quota_project`.
+
+    Raises if no identity can be obtained. There is no useful fallback: a
+    `gs://` object in the customer's bucket is not readable anonymously, and
+    the 401 that would follow is three layers away from the cause.
+    """
+    creds = credentials_without_quota_project()
+    if creds is None:
+        raise RuntimeError(
+            "读不到这台机器的 Google 身份（ADC），没法访问 GCS 上的视频。"
+            "本机跑的话先执行 `gcloud auth application-default login`。"
+        )
+    creds.refresh(google.auth.transport.requests.Request())
+    token = getattr(creds, "token", None)
+    if not token:
+        raise RuntimeError("刷新 Google 凭据之后仍然没拿到 access token。")
+    return token
+
+
 def get_genai_client() -> genai.Client:
     """Returns the shared Vertex AI client (created on first use)."""
     global _client

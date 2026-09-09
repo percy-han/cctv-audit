@@ -47,6 +47,7 @@ from .analyzer.schema import Severity, Status, WindowResult
 from .analyzer.sop import SopRuleSet, load_rules
 from .analyzer.video_analyzer import AnalysisOutcome
 from .artifacts import LocalArtifactSink, artifact_sink
+from .capture import gcs_video
 from .capture.ffmpeg_util import extract_frame
 from .capture.types import Clip
 from .config import config
@@ -62,6 +63,29 @@ class RunStats:
     red_line_violations: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # How much of the footage the model could actually read. Counted because
+    # "0 violations" has two opposite causes -- everyone behaved, or nothing was
+    # visible -- and the model already distinguishes them per rule
+    # (CANNOT_DETERMINE) and per window (`visibility_ok`). Only the summary threw
+    # that away, which is how a recording of coloured blocks earned a green tick.
+    windows_unreadable: int = 0
+    checks_total: int = 0
+    checks_undetermined: int = 0
+
+    @property
+    def read_everything(self) -> bool:
+        """True when every rule in every window got a real verdict."""
+        return self.checks_total > 0 and self.checks_undetermined == 0
+
+    @property
+    def read_nothing(self) -> bool:
+        """True when not one rule anywhere could be judged.
+
+        Distinct from `not read_everything`: a run with one blurred window out
+        of forty still found things, and saying "本次没有得出结论" about it would
+        be its own kind of lie.
+        """
+        return self.checks_total > 0 and self.checks_undetermined == self.checks_total
 
     def as_dict(self) -> dict:
         return {
@@ -71,6 +95,9 @@ class RunStats:
             "red_line_violations": self.red_line_violations,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
+            "windows_unreadable": self.windows_unreadable,
+            "checks_total": self.checks_total,
+            "checks_undetermined": self.checks_undetermined,
         }
 
 
@@ -203,6 +230,12 @@ class AuditStore:
             self.stats.red_line_violations += sum(
                 1 for f in violations if f["severity"] == Severity.RED_LINE.value
             )
+            self.stats.checks_total += len(findings)
+            self.stats.checks_undetermined += sum(
+                1 for f in findings if f["status"] == Status.CANNOT_DETERMINE.value
+            )
+            if not result.visibility_ok:
+                self.stats.windows_unreadable += 1
             self.stats.input_tokens += outcome.input_tokens
             self.stats.output_tokens += outcome.output_tokens
 
@@ -266,9 +299,16 @@ class AuditStore:
         """
         name = f"w{clip.index:05d}_{finding.rule_id}_{int(finding.offset_seconds):04d}.jpg"
         out_path = self.evidence_dir / name
-        # The offset is inside the clip file, which is where ffmpeg has to seek.
-        # For a sped-up recording that is not the same as the video offset.
-        ok = await extract_frame(clip.path, finding.offset_seconds, out_path)
+        # The offset is inside the clip, which is where ffmpeg has to seek. For
+        # a sped-up recording that is not the same as the video offset; for a
+        # whole-file audit the clip *is* the video, so the two coincide.
+        if clip.is_remote:
+            # Nothing was captured, so there is no local copy to cut from. The
+            # still comes out of the object itself -- a byte-range read of a
+            # few hundred KB, whatever the recording's size.
+            ok = await gcs_video.frame_at(clip.uri, finding.offset_seconds, out_path)
+        else:
+            ok = await extract_frame(clip.path, finding.offset_seconds, out_path)
         if not ok:
             return None
 

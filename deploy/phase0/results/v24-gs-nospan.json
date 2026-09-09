@@ -1,0 +1,71 @@
+{
+  "message": {
+    "contextId": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/1939992119683149562",
+    "role": "ROLE_AGENT",
+    "content": [
+      {
+        "text": "收到，我先去看一眼这个视频……"
+      },
+      {
+        "text": "找到视频了：poc-video/chagee-01.mp4\n采集方式：直接读文件（GCS）\n分析方式：agentic，整段视频一次看完，不切片\n视频总长：05:02\n要稽核：整段视频，从头看到尾\n\n单号 `292712`。确认开始稽核吗？回「确认」我就开跑。"
+      }
+    ],
+    "metadata": {
+      "dataSourceInfo": {
+        "selectionMode": "SELECTION_MODE_NONE"
+      },
+      "sessionInfo": {
+        "queryId": "14118607640014351336",
+        "turnId": "1939992119683149562_14118607640014350849",
+        "session": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/1939992119683149562"
+      },
+      "agentInfo": {
+        "displayName": "门店视频稽核",
+        "agent": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/assistants/default_assistant/agents/16091433261218097511"
+      },
+      "assistToken": "NMwKDAicmYTVBhCat43TARIkNmFhMTBhOTAtMDAwMC0yNmNmLTlkYTktNTgyNDI5YWY1Mjdj",
+      "answer": {
+        "name": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/1939992119683149562/assistAnswers/14118607640014349388",
+        "diagnosticInfo": {
+          "plannerSteps": [
+            {
+              "queryStep": {
+                "parts": [
+                  {
+                    "text": "稽核视频的全部内容 gs://study-project-496907-cctv-audit/poc-video/chagee-01.mp4 。如果操作员没有带蓝色手套测则视为违规"
+                  }
+                ]
+              },
+              "createTime": "2026-09-09T07:37:02.308801352Z"
+            },
+            {
+              "createTime": "2026-09-09T07:37:08.608715745Z",
+              "planStep": {
+                "parts": [
+                  {
+                    "text": "收到，我先去看一眼这个视频……"
+                  }
+                ],
+                "role": "MODEL",
+                "planStepId": "2625396302783721080"
+              }
+            },
+            {
+              "createTime": "2026-09-09T07:37:11.876909343Z",
+              "planStep": {
+                "role": "MODEL",
+                "planStepId": "2625396302783721080",
+                "parts": [
+                  {
+                    "text": "找到视频了：poc-video/chagee-01.mp4\n采集方式：直接读文件（GCS）\n分析方式：agentic，整段视频一次看完，不切片\n视频总长：05:02\n要稽核：整段视频，从头看到尾\n\n单号 `292712`。确认开始稽核吗？回「确认」我就开跑。"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "state": "SUCCEEDED"
+      }
+    }
+  }
+}

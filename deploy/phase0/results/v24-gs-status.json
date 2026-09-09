@@ -1,0 +1,56 @@
+{
+  "message": {
+    "contextId": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/1939992119683149562",
+    "role": "ROLE_AGENT",
+    "content": [
+      {
+        "text": "### 📊 稽核完成\n- 分析窗口：1 个\n- 稽核区间：00:00 - 05:02（请求 00:00 - 05:02）\n- 发现违规：4 项，其中红线 4 项\n- 判读情况：7 项检查中 2 项无法判定\n- 采集方式：file，耗时 111.4s\n- 结束原因：采集结束\n- Token：输入 131809，输出 3460\n- 明细：`Firestore[cctv-audit] cctv_audit_users/gce-automation-sa@study-project-496907.iam.gserviceaccount.com/jobs/292712/records`，证据帧：`gs://study-project-496907-cctv-audit/audits/evidence/292712`\n\n### ⚠️ 违规判定结果\n| 违规规则 | 相关时间范围 | 判定依据 | 严重程度 | 证据帧 |\n| :--- | :--- | :--- | :--- | :--- |\n| CHK_ATTIRE_001 着装仪容规范 | 00:00 - 05:01（定位 00:26）| 戴眼镜男员工未佩戴工帽，黑色短发完全暴露在外；面部口鼻完全裸露，未佩戴口罩，正在操作台前拿取量杯作业 | 致命缺陷（置信度 98%）| gs://study-project-496907-cctv-audit/audits/evidence/292712/w00000_CHK_ATTIRE_001_0026.jpg |\n| CHK_ATTIRE_001 着装仪容规范 | 00:00 - 05:01（定位 00:42）| 女员工未佩戴工帽，额前及耳后碎发外露；面部口鼻完全裸露，未佩戴口罩，正在操作台前进行物料拆包加料 | 致命缺陷（置信度 98%）| gs://study-project-496907-cctv-audit/audits/evidence/292712/w00000_CHK_ATTIRE_001_0042.jpg |\n| CHK_ATTIRE_001 着装仪容规范 | 00:00 - 05:01（定位 03:08）| 年轻男员工未佩戴工帽，短发完全裸露；面部口鼻完全裸露，未佩戴口罩，手持塑料桶进入后厨操作区 | 致命缺陷（置信度 98%）| gs://study-project-496907-cctv-audit/audits/evidence/292712/w00000_CHK_ATTIRE_001_0188.jpg |\n| CHK_BEHAVIOR_004 操作纪律红线 | 00:00 - 05:01（定位 04:53）| 戴眼镜男员工双手持一台带有粉色保护壳的手机置于胸前，屏幕亮起，在操作区域持续低头注视并操作个人手机屏幕 | 致命缺陷（置信度 99%）| gs://study-project-496907-cctv-audit/audits/evidence/292712/w00000_CHK_BEHAVIOR_004_0293.jpg |\n\n\u003e 每个窗口的「视觉证据锚定」与完整动作描述记录在 JSONL 的 `visual_scan` / `action_narrative` 字段中，可用于复核判定是否有据。"
+      }
+    ],
+    "metadata": {
+      "dataSourceInfo": {
+        "selectionMode": "SELECTION_MODE_NONE"
+      },
+      "answer": {
+        "name": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/1939992119683149562/assistAnswers/5025101672021836018",
+        "state": "SUCCEEDED",
+        "diagnosticInfo": {
+          "plannerSteps": [
+            {
+              "queryStep": {
+                "parts": [
+                  {
+                    "text": "好了吗"
+                  }
+                ]
+              },
+              "createTime": "2026-09-09T07:40:01.238476416Z"
+            },
+            {
+              "planStep": {
+                "parts": [
+                  {
+                    "text": "### 📊 稽核完成\n- 分析窗口：1 个\n- 稽核区间：00:00 - 05:02（请求 00:00 - 05:02）\n- 发现违规：4 项，其中红线 4 项\n- 判读情况：7 项检查中 2 项无法判定\n- 采集方式：file，耗时 111.4s\n- 结束原因：采集结束\n- Token：输入 131809，输出 3460\n- 明细：`Firestore[cctv-audit] cctv_audit_users/gce-automation-sa@study-project-496907.iam.gserviceaccount.com/jobs/292712/records`，证据帧：`gs://study-project-496907-cctv-audit/audits/evidence/292712`\n\n### ⚠️ 违规判定结果\n| 违规规则 | 相关时间范围 | 判定依据 | 严重程度 | 证据帧 |\n| :--- | :--- | :--- | :--- | :--- |\n| CHK_ATTIRE_001 着装仪容规范 | 00:00 - 05:01（定位 00:26）| 戴眼镜男员工未佩戴工帽，黑色短发完全暴露在外；面部口鼻完全裸露，未佩戴口罩，正在操作台前拿取量杯作业 | 致命缺陷（置信度 98%）| gs://study-project-496907-cctv-audit/audits/evidence/292712/w00000_CHK_ATTIRE_001_0026.jpg |\n| CHK_ATTIRE_001 着装仪容规范 | 00:00 - 05:01（定位 00:42）| 女员工未佩戴工帽，额前及耳后碎发外露；面部口鼻完全裸露，未佩戴口罩，正在操作台前进行物料拆包加料 | 致命缺陷（置信度 98%）| gs://study-project-496907-cctv-audit/audits/evidence/292712/w00000_CHK_ATTIRE_001_0042.jpg |\n| CHK_ATTIRE_001 着装仪容规范 | 00:00 - 05:01（定位 03:08）| 年轻男员工未佩戴工帽，短发完全裸露；面部口鼻完全裸露，未佩戴口罩，手持塑料桶进入后厨操作区 | 致命缺陷（置信度 98%）| gs://study-project-496907-cctv-audit/audits/evidence/292712/w00000_CHK_ATTIRE_001_0188.jpg |\n| CHK_BEHAVIOR_004 操作纪律红线 | 00:00 - 05:01（定位 04:53）| 戴眼镜男员工双手持一台带有粉色保护壳的手机置于胸前，屏幕亮起，在操作区域持续低头注视并操作个人手机屏幕 | 致命缺陷（置信度 99%）| gs://study-project-496907-cctv-audit/audits/evidence/292712/w00000_CHK_BEHAVIOR_004_0293.jpg |\n\n\u003e 每个窗口的「视觉证据锚定」与完整动作描述记录在 JSONL 的 `visual_scan` / `action_narrative` 字段中，可用于复核判定是否有据。"
+                  }
+                ],
+                "planStepId": "18142422215648405243",
+                "role": "MODEL"
+              },
+              "createTime": "2026-09-09T07:40:04.434318962Z"
+            }
+          ]
+        }
+      },
+      "assistToken": "NMwKDAjQmoTVBhCxnLfUAhIkNmE5ZjEyOWYtMDAwMC0yNzBkLWJjYjktYzgyYWRkN2Q3ZGMw",
+      "sessionInfo": {
+        "queryId": "5025101672021838710",
+        "turnId": "1939992119683149562_5025101672021837013",
+        "session": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/1939992119683149562"
+      },
+      "agentInfo": {
+        "agent": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/assistants/default_assistant/agents/16091433261218097511",
+        "displayName": "门店视频稽核"
+      }
+    }
+  }
+}

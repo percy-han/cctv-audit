@@ -55,13 +55,31 @@ from typing import Optional
 from pydantic import BaseModel, Field, ValidationError
 
 from .analyzer.schema import _inline_refs
+from .capture.gcs_video import is_gcs_uri, parse_gs_uri
 from .capture.types import Clip
 from .config import config
 from .pipeline import AuditRequest
 
 logger = logging.getLogger("cctv_audit.intent")
 
-_URL_RE = re.compile(r"https?://\S+")
+# Punctuation that can end a Chinese sentence but never a URL. It has to be
+# excluded from the match rather than stripped off afterwards: Chinese puts no
+# space after a comma, so `\S+` on "稽核 <网址>，从 05:00 开始" captured
+# "<网址>，从" -- and no amount of trailing-character stripping gets "从" back
+# off the end. A path can hold Chinese *characters* (`gs://桶/开店/v3.mp4`),
+# so only the punctuation is excluded, not CJK generally.
+_URL_STOP = "，。；、！？：）】」』》〉“”‘’"
+
+# `gs://` alongside http(s): the customer's own SOP recordings are files in a
+# bucket, not pages, and the entrance has to recognise one when it is pasted.
+_URL_RE = re.compile(rf"(?:https?|gs)://[^\s{_URL_STOP}]+")
+
+_SCHEMES = ("http://", "https://", "gs://")
+
+# The ASCII half of the same problem, for addresses that arrive already
+# extracted (the model's `target_url`, or GE's structured field) and so never
+# went through `_URL_RE`.
+_TRAILING_PUNCT = _URL_STOP + ")、,;"
 
 # A time on its own: "12:30", "01:02:03", "5分钟", "90秒", "5min", "90s".
 _CLOCK = r"\d{1,3}:\d{2}(?::\d{2})?"
@@ -115,7 +133,10 @@ class _Reading(BaseModel):
     )
     target_url: str = Field(
         default="",
-        description="要稽核的视频地址，必须逐字符照抄消息里出现的地址，不得改写、补全或臆造；消息里没有就留空",
+        description=(
+            "要稽核的视频地址，网页地址（http/https）或存储桶文件地址（gs://）都算。"
+            "必须逐字符照抄消息里出现的地址，不得改写、补全或臆造；消息里没有就留空"
+        ),
     )
     start_seconds: float = Field(
         default=0.0, ge=0, description="从视频的第几秒开始看；没说就填 0（从头）"
@@ -141,7 +162,8 @@ _SYSTEM_INSTRUCTION = """\
 
 规则：
 1. URL 逐字符照抄，包括查询参数。不要补全、不要改写、不要凭印象生成一个地址。
-   消息里没有 http/https 开头的地址，就把 target_url 留空。
+   地址有两种：网页地址（http/https 开头）和存储桶里的视频文件地址（gs:// 开头），
+   两种都照抄。消息里两种都没有，就把 target_url 留空。
 2. 时间一律换算成「相对视频开头的秒数」。
    - 「第1分钟到第5分钟」= 从 60 秒看到 300 秒（指的是进度条上的 01:00 和 05:00 两个刻度，
      不是「第1分钟这一整分钟」）。
@@ -209,13 +231,18 @@ def from_fields(
     Raises `ValueError` when no video is named and `UnreadableTimeSpan` when
     the span makes no sense. Never guesses.
     """
-    url = (target or "").strip().rstrip("）)、,。;；")
+    url = (target or "").strip().rstrip(_TRAILING_PUNCT)
     if not url:
         raise ValueError("没有给视频地址")
-    if not url.lower().startswith(("http://", "https://")):
+    if not url.lower().startswith(_SCHEMES):
         # A shop name is not a URL. Turning one into a search would audit
         # whatever came back first, which is the wrong shop by default.
-        raise ValueError(f"{url!r} 不是一个视频地址")
+        raise ValueError(f"{url!r} 不是一个视频地址（要么是网址，要么是 gs:// 开头的文件地址）")
+    if is_gcs_uri(url):
+        # Fail here, where the customer is still in the conversation, rather
+        # than a minute later inside a preflight. `gs://bucket` with no object
+        # and a trailing slash are both things people actually paste.
+        parse_gs_uri(url)
 
     start_seconds = _coerce_seconds(start, "起点") or 0.0
     end_seconds = _coerce_seconds(end, "终点")
@@ -292,7 +319,7 @@ def _to_intent(reading: _Reading, text: str) -> Optional[Intent]:
     actually in the message -- a hallucinated video id navigates somewhere real
     and audits the wrong shop, which is worse than not starting.
     """
-    url = reading.target_url.strip().rstrip("）)、,。;；")
+    url = reading.target_url.strip().rstrip(_TRAILING_PUNCT)
     if url and url not in text:
         logger.warning("Model returned a URL that is not in the message; falling back "
                        "to the one that is.")
@@ -301,7 +328,7 @@ def _to_intent(reading: _Reading, text: str) -> Optional[Intent]:
         found = _URL_RE.search(text)
         if not found:
             return None
-        url = found.group(0).rstrip("）)、,。;；")
+        url = found.group(0).rstrip(_TRAILING_PUNCT)
 
     if not reading.understood:
         raise UnreadableTimeSpan(reading.problem.strip() or "时间段没说清楚")
@@ -338,7 +365,7 @@ def parse_request(text: str) -> Optional[AuditRequest]:
     match = _URL_RE.search(text)
     if not match:
         return None
-    target = match.group(0).rstrip("）)、,。;；")
+    target = match.group(0).rstrip(_TRAILING_PUNCT)
 
     # Read times from the sentence *around* the URL. A bilibili link carries
     # things like `spm_id_from=333.337.search-card...`, and digits inside a

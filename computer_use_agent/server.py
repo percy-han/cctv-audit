@@ -48,6 +48,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .audit_service import AuditService, audit_service
+from .config import config
 from .intent import UnreadableTimeSpan, from_fields
 from .jobs import Job
 from .logsetup import setup_logging
@@ -69,6 +70,26 @@ GE_METHOD = "streaming_agent_run_with_events"
 
 INSTANCE_ID = (
     os.environ.get("K_REVISION") or os.environ.get("HOSTNAME") or "local"
+)
+
+# One line, at import, saying what this container is actually configured to do.
+# Written because on 2026-09-09 the only way to answer "is the deployment on
+# agentic?" was to read the engine's env vars out of the API -- the logs said
+# nothing, and the per-window token counts of static/60s and agentic/60s are
+# close enough to be ambiguous. A deployment that cannot state its own settings
+# forces every question about them into a deploy-time archaeology exercise.
+logger.info(
+    "Config: instance=%s processing=%s window=%ss overlap=%ss model=%s "
+    "capture=%s concurrency=%s resolution=%s fps=%s",
+    INSTANCE_ID,
+    config.media_processing,
+    config.window_seconds,
+    config.window_overlap_seconds,
+    config.analysis_model,
+    config.capture_mode,
+    config.analysis_concurrency,
+    config.media_resolution,
+    config.analysis_fps,
 )
 
 
@@ -136,7 +157,15 @@ async def serve_turn(
         # Deliberately not a keyword fallback. A confident wrong reading is the
         # failure this path exists to avoid; saying "say that again" is cheap.
         logger.warning("Could not read the turn: %s", exc)
-        yield say("我这边一时读不懂这句话，麻烦再说一遍要稽核哪个视频、哪个时间段。")
+        # Says which of the two it was. "读不懂" for a call that never came back
+        # sends the customer off rewriting a sentence that was fine -- measured:
+        # the same words worked on the retry.
+        timed_out = "超时" in str(exc)
+        yield say(
+            "我这边读你这句话的时候超时了，**不是你说得不清楚**。原样再发一遍就行。"
+            if timed_out else
+            "我这边一时读不懂这句话，麻烦再说一遍要稽核哪个视频、哪个时间段。"
+        )
         return
 
     try:
@@ -189,15 +218,29 @@ def _describe_preflight(job: Job) -> str:
     if job.state != "ready":
         return f"❌ 这段查不了：{info.get('problem') or job.error or '未知原因'}"
 
-    mode = "抓流" if info.get("capture_mode") == "stream" else "录屏"
     lines = [f"找到视频了{'：' + info['title'] if info.get('title') else ''}"]
-    lines.append(f"采集方式：{mode}")
+    lines.append(f"采集方式：{_CAPTURE_LABELS.get(info.get('capture_mode'), '录屏')}")
+
+    analysis = _describe_analysis(info)
+    if analysis:
+        lines.append(analysis)
 
     duration = info.get("video_duration_seconds")
     if duration:
         lines.append(f"视频总长：{_hms(duration)}")
     start, end = info.get("requested_start_seconds"), info.get("requested_end_seconds")
-    if end is not None:
+    if _is_whole_file(info):
+        # The time span is not honoured on this path, so it must not be echoed
+        # back as if it were. Saying it out loud is the point: a customer who
+        # asked for 05:00-07:00 and gets a report covering half an hour would
+        # otherwise conclude the audit ignored them, which is exactly what it
+        # did -- the difference is whether they were told before confirming.
+        asked = (
+            f"（你说的 {_hms(start or 0)} - {_hms(end)} 这次用不上）"
+            if end is not None else ""
+        )
+        lines.append(f"要稽核：整段视频，从头看到尾{asked}")
+    elif end is not None:
         lines.append(f"要稽核：{_hms(start or 0)} - {_hms(end)}")
     if info.get("span_available") is False and info.get("problem"):
         lines.append(f"⚠️ {info['problem']}")
@@ -205,6 +248,57 @@ def _describe_preflight(job: Job) -> str:
     lines.append("")
     lines.append(f"单号 `{job.job_id}`。确认开始稽核吗？回「确认」我就开跑。")
     return "\n".join(lines)
+
+
+# The default is "录屏" rather than "不知道" because that is what an unknown
+# mode used to render as, and Plan B is the fallback the pipeline actually
+# picks when it cannot decide. A new mode showing up here as 录屏 is a wrong
+# label; showing up as blank would be a broken-looking reply.
+_CAPTURE_LABELS = {
+    "stream": "抓流",
+    "screen": "录屏",
+    "file": "直接读文件（GCS）",
+}
+
+
+def _describe_analysis(info: dict) -> str:
+    """Which way the footage gets read, in one line.
+
+    Two very different runs hide behind the same "开始稽核": agentic costs 3.4x
+    static and takes 45-155s a window instead of ~20s. The customer is being
+    asked to confirm one of them, so it should say which. The mode's name and
+    nothing else -- what it costs and how careful it is were our editorial and
+    do not belong in a line the customer reads as fact.
+
+    The second half is the shape of the run, and it differs by plan: a `gs://`
+    object goes to the model whole, everything else is cut into windows.
+
+    Falls back to the running config for jobs whose preflight predates this
+    field -- and says nothing at all if even that is unreadable, rather than
+    naming a mode that might not be the one about to run.
+    """
+    mode = info.get("analysis_mode") or config.media_processing
+    window = info.get("analysis_window_seconds") or config.window_seconds
+    if mode not in ("agentic", "static"):
+        return ""
+    if _is_whole_file(info):
+        return f"分析方式：{mode}，整段视频一次看完，不切片"
+    return f"分析方式：{mode}，{window} 秒一段"
+
+
+def _is_whole_file(info: dict) -> bool:
+    """Whether this job reads one whole object instead of a run of windows.
+
+    Reads `analysis_scope` when preflight recorded one and falls back to the
+    capture mode, which has meant the same thing since Plan C existed. Two
+    sources because jobs created before the field was added are still in
+    Firestore, and answering "windows" for one of them would promise a live
+    picture that this path has never had.
+    """
+    scope = info.get("analysis_scope")
+    if scope:
+        return scope == "whole_file"
+    return info.get("capture_mode") == "file"
 
 
 async def _do_confirm(svc, turn: Turn, say):
@@ -224,9 +318,17 @@ async def _do_confirm(svc, turn: Turn, say):
         return
 
     started = await svc.start_audit(turn.user_id, job.job_id)
+    # No live picture on a whole-file run: there is no page to show and no
+    # window-by-window progress to watch, so the link would open an empty
+    # dashboard. An empty dashboard is how the last two demos went wrong --
+    # the operator reads it as a freeze. Better not to offer it.
+    watch = (
+        "" if _is_whole_file(job.preflight or {})
+        else f"实时画面：{_dashboard_link(started.job_id)}\n"
+    )
     yield say(
         f"好，开始稽核了，单号 `{started.job_id}`。\n"
-        f"实时画面：{_dashboard_link(started.job_id)}\n"
+        f"{watch}"
         "这一步要跑一段时间，你随时回「好了吗」查进度，跑完我把报告给你。"
     )
 

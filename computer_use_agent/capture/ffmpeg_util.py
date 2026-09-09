@@ -55,9 +55,23 @@ async def probe_stream(url: str, headers: Optional[dict] = None, timeout: float 
     This is the gate for Plan A: a URL that ffprobe cannot open (proprietary
     container, DRM, auth failure) must fall back to screen recording.
     """
+    info, _ = await probe_stream_verbose(url, headers, timeout)
+    return info
+
+
+async def probe_stream_verbose(
+    url: str, headers: Optional[dict] = None, timeout: float = 15.0
+) -> tuple[Optional[dict], str]:
+    """`probe_stream`, plus what ffprobe said when it said no.
+
+    Plan A does not need the reason -- it just falls back to recording the
+    page. A `gs://` object has nothing to fall back to, so "404 Not Found" and
+    "403 Forbidden" and "this is a .txt" have to reach the customer, who is the
+    only one who can fix any of them.
+    """
     _, ffprobe = require_ffmpeg()
     args = [ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_streams"]
-    args += _header_args(headers)
+    args += header_args(headers)
     args += [url]
 
     try:
@@ -66,7 +80,7 @@ async def probe_stream(url: str, headers: Optional[dict] = None, timeout: float 
         )
     except OSError as exc:
         logger.warning("ffprobe could not start: %s", exc)
-        return None
+        return None, f"ffprobe 起不来：{exc}"
 
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -74,22 +88,26 @@ async def probe_stream(url: str, headers: Optional[dict] = None, timeout: float 
         proc.kill()
         await proc.wait()
         logger.info("ffprobe timed out after %.0fs on %s", timeout, _redact(url))
-        return None
+        return None, f"{timeout:.0f} 秒内没读出这个文件的信息"
 
     if proc.returncode != 0:
-        logger.info("ffprobe rejected %s: %s", _redact(url), stderr.decode("utf-8", "replace")[:200])
-        return None
+        detail = stderr.decode("utf-8", "replace").strip()
+        logger.info("ffprobe rejected %s: %s", _redact(url), detail[:200])
+        # The last line is the one that names the cause; the ones before it are
+        # ffmpeg's banner and per-protocol chatter.
+        last = detail.splitlines()[-1] if detail else ""
+        return None, _redact(last)[:300] or "打不开这个文件"
 
     try:
         info = json.loads(stdout.decode("utf-8", "replace"))
     except json.JSONDecodeError:
-        return None
+        return None, "ffprobe 的输出读不成 JSON"
 
     has_video = any(s.get("codec_type") == "video" for s in info.get("streams", []))
     if not has_video:
         logger.info("ffprobe found no video stream in %s", _redact(url))
-        return None
-    return info
+        return None, "这个文件里没有视频轨"
+    return info, ""
 
 
 async def extract_frame(clip_path: Path, offset_seconds: float, out_path: Path) -> bool:
@@ -118,7 +136,7 @@ async def extract_frame(clip_path: Path, offset_seconds: float, out_path: Path) 
     return True
 
 
-def _header_args(headers: Optional[dict]) -> list[str]:
+def header_args(headers: Optional[dict]) -> list[str]:
     if not headers:
         return []
     blob = "".join(f"{k}: {v}\r\n" for k, v in headers.items())

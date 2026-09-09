@@ -66,6 +66,10 @@ def _blank_state() -> Dict[str, Any]:
         "video_segments": [],
         "sop_violations": [],
         "intervention": None,
+        # When the run stopped, epoch seconds, or None while it is still going.
+        # Stamped here rather than sent by the container so it cannot disagree
+        # with the clock the page formats it against.
+        "finished_at": None,
     }
 
 
@@ -302,7 +306,19 @@ async def post_event(request: Request):
     room_state = room.state
 
     if event_type == "state":
+        was = room_state.get("status")
         room_state.update(payload.get("data", {}))
+        now = room_state.get("status")
+        # Live frames stop the moment a run ends, and nothing replays them: open
+        # the link afterwards and the video panel is blank with no explanation.
+        # Job 781c96 was read as "the dashboard broke" for exactly this reason --
+        # the WebSocket joined 55s after the audit had finished. Stamping the
+        # moment lets the page say so instead of showing an empty box.
+        if now in ("COMPLETED", "ERROR") and was not in ("COMPLETED", "ERROR"):
+            room_state["finished_at"] = time.time()
+        elif now == "RUNNING":
+            # A room is reused when the same job id starts again locally.
+            room_state["finished_at"] = None
     elif event_type == "frame":
         room_state["latest_frame_b64"] = payload.get("frame")
         if payload.get("url"):

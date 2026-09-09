@@ -329,6 +329,71 @@ class TestWhenTheTurnCannotBeRead:
         assert "再说一遍" in "\n".join(said)
 
     @pytest.mark.asyncio
+    async def test_a_slow_read_is_tried_again_before_giving_up(self, monkeypatch):
+        """One slow call must not cost the customer his sentence.
+
+        Measured 2026-09-09: `读取意图超时（20 秒）`, and the identical sentence
+        re-sent minutes later parsed fine. The retries `_ask_model` already does
+        were inside the timeout, so the budget was gone before they ran.
+        """
+        import computer_use_agent.turn as turn_mod
+
+        calls = []
+
+        async def slow_then_fine(_turn):
+            calls.append(1)
+            if len(calls) == 1:
+                await asyncio.sleep(9999)  # never returns; the wait_for fires
+            return _Decision(action="status")
+
+        monkeypatch.setattr(turn_mod, "_ask_model", slow_then_fine)
+        monkeypatch.setattr(turn_mod, "_TIMEOUT_SECONDS", 0.01)
+
+        out = await turn_mod.read_intent(
+            Turn(text="好了吗", session_id="s", user_id="u"))
+
+        assert len(calls) == 2, "the second attempt is the whole point"
+        assert out.action == "status"
+
+    @pytest.mark.asyncio
+    async def test_a_model_that_answers_nonsense_is_not_retried(self, monkeypatch):
+        import computer_use_agent.turn as turn_mod
+        from computer_use_agent.turn import ModelUnavailable
+
+        calls = []
+
+        async def garbage(_turn):
+            calls.append(1)
+            raise ModelUnavailable("模型返回了读不懂的结果")
+
+        monkeypatch.setattr(turn_mod, "_ask_model", garbage)
+
+        with pytest.raises(ModelUnavailable):
+            await turn_mod.read_intent(Turn(text="x", session_id="s", user_id="u"))
+
+        # Asking the same question again gets the same answer. Only silence is
+        # worth a second go.
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_says_it_timed_out_not_that_you_were_unclear(
+        self, service, monkeypatch
+    ):
+        from computer_use_agent.turn import ModelUnavailable
+
+        async def timed_out(_turn):
+            raise ModelUnavailable("读取意图超时（每次 20 秒，试了 2 次）")
+
+        monkeypatch.setattr(server, "read_intent", timed_out)
+        said = "\n".join(await _collect(_payload("稽核 gs://b/a.mp4 全部内容"), service))
+
+        # Telling someone his sentence was unreadable sends him off rewriting a
+        # sentence that was fine.
+        assert "超时" in said
+        assert "读不懂" not in said
+        assert service.started == []
+
+    @pytest.mark.asyncio
     async def test_a_turn_with_no_caller_identity_is_refused(self, service, monkeypatch):
         said = await _collect(_payload("稽核 https://x/v", user=""), service)
         assert "身份" in "\n".join(said)
@@ -439,6 +504,52 @@ class TestTheModelReadsButDoesNotInvent:
         )
 
         assert out.action == "audit"
+
+    def test_a_bucket_object_is_never_asked_for_a_time_span(self):
+        from computer_use_agent.turn import _validate
+
+        # Measured 2026-09-09 in GE: "稽核视频的全部内容 gs://.../chagee-01.mp4"
+        # was answered with "从 00:00 开始，看到哪为止？", twice, and the span the
+        # customer finally gave was then discarded -- the confirmation said so
+        # itself ("你说的 00:00 - 05:00 这次用不上"). A `gs://` object is read
+        # whole, in one request, so there is nothing for the answer to change.
+        uri = "gs://study-project-496907-cctv-audit/poc-video/chagee-01.mp4"
+        turn = Turn(text=f"稽核视频的全部内容 {uri}", session_id="s", user_id="u")
+        out = _validate(
+            _Decision(action="audit", target_url=uri, span_stated=False),
+            turn,
+        )
+
+        assert out.action == "audit", "a bucket object needs no span to start"
+        assert out.target_url == uri
+
+    def test_a_bucket_object_with_a_start_but_no_end_also_goes_through(self):
+        from computer_use_agent.turn import _validate
+
+        # The second gate, which is the one Percy actually hit: the model read
+        # "从头看" as start 0 / end -1 and the open-ended check bounced it.
+        uri = "gs://b/poc-video/a.mp4"
+        turn = Turn(text=f"{uri} 从头看", session_id="s", user_id="u")
+        out = _validate(
+            _Decision(action="audit", target_url=uri, span_stated=True,
+                      start_seconds=0.0, end_seconds=-1.0),
+            turn,
+        )
+
+        assert out.action == "audit"
+
+    def test_a_web_page_with_no_span_is_still_asked(self):
+        from computer_use_agent.turn import _validate
+
+        # The exemption is for bucket objects only. An open-ended audit of a
+        # *page* still runs until the hour-long budget stops it, which is the
+        # thing that question was added to prevent.
+        turn = Turn(text="稽核 https://x/v 的全部内容", session_id="s", user_id="u")
+        out = _validate(
+            _Decision(action="audit", target_url="https://x/v", span_stated=False),
+            turn,
+        )
+        assert out.action == "unclear"
 
     def test_an_action_outside_the_four_becomes_unclear(self):
         from computer_use_agent.turn import _validate

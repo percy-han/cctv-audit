@@ -38,6 +38,7 @@ from playwright.async_api import async_playwright
 
 from .analyzer import SopRuleSet, VideoAnalyzer, load_rules
 from .artifacts import artifact_sink
+from .capture import gcs_video
 from .capture.preview import LivePreview
 from .capture.probe import StreamProbe
 from .capture.screen_recorder import ScreenRecorder, content_box
@@ -182,6 +183,31 @@ class PreflightResult:
     # can see we are looking at their shop and not somebody else's.
     cover_frame: Optional[str] = None
     title: str = ""
+    # How this deployment will read the footage. Not a property of the video --
+    # it is what the container is configured to do -- but it belongs in the
+    # answer the customer confirms, because it is what the run will cost and
+    # how long it will take. There is no startup banner anywhere, so without
+    # this the only way to know which mode is live is to read the engine's env
+    # vars, which is what had to be done on 2026-09-09 to answer the question.
+    # `default_factory` rather than a value passed at each construction site:
+    # preflight returns from four places, and a field that can be forgotten in
+    # one of them would report "static" on the error path of an agentic run.
+    analysis_mode: str = field(default_factory=lambda: config.media_processing)
+    analysis_window_seconds: int = field(default_factory=lambda: config.window_seconds)
+    analysis_model: str = field(default_factory=lambda: config.analysis_model)
+
+    @property
+    def analysis_scope(self) -> str:
+        """"whole_file" when the model reads the recording in one piece.
+
+        Derived from `capture_mode` rather than stored, because the two can
+        never disagree and a stored copy could: this is the same decision seen
+        from the other end. Plan C hands Vertex a `gs://` address and Vertex
+        reads all of it -- there is nothing to slice, and asking it to look at
+        one window of the object is a documented no-op under agentic
+        (see `WholeFileProducer`).
+        """
+        return "whole_file" if self.capture_mode == "file" else "windows"
 
     def as_dict(self) -> dict:
         return {
@@ -197,12 +223,23 @@ class PreflightResult:
             "problem": self.problem,
             "cover_frame": self.cover_frame,
             "title": self.title,
+            "analysis_mode": self.analysis_mode,
+            "analysis_window_seconds": self.analysis_window_seconds,
+            "analysis_model": self.analysis_model,
+            "analysis_scope": self.analysis_scope,
         }
 
 
 @dataclass
 class _Session:
-    """A live browser sitting on a playing video, with the plan for capturing it."""
+    """A video we are ready to capture from, and whatever is holding it open.
+
+    Usually that is a live browser sitting on a playing page. On the `gs://`
+    path there is no browser at all, so `page`, `context` and `navigator` are
+    None -- which is the one thing every consumer has to check before reaching
+    for them. `has_page` is that check, spelled out, because `if session.page`
+    reads like a truthiness bug even when it is not.
+    """
 
     page: object
     context: object
@@ -210,6 +247,10 @@ class _Session:
     source: CaptureSource
     work_dir: Path
     platform: str
+
+    @property
+    def has_page(self) -> bool:
+        return self.page is not None
 
 
 class AuditPipeline:
@@ -324,6 +365,54 @@ class AuditPipeline:
             f"网页已经 {seconds:.0f} 秒没有重绘了，大屏显示的是一张静止画面"
             f"（弹窗、暂停或者页面卡住）。稽核不受影响，仍在继续。"
         )
+
+    @contextlib.asynccontextmanager
+    async def _capture_session(self, request: AuditRequest, *, live_preview: bool = True):
+        """Gets the video ready to capture, whichever kind of target it is.
+
+        The one place the `gs://` path forks off. Everything downstream --
+        windowing, analysis, evidence, the report -- sees the same `_Session`
+        and the same MP4 clips, so this is the only branch either plan needs.
+        """
+        if gcs_video.is_gcs_uri(request.target):
+            async with self._file_session(request) as session:
+                yield session
+        else:
+            async with self._browser_session(request, live_preview=live_preview) as session:
+                yield session
+
+    @contextlib.asynccontextmanager
+    async def _file_session(self, request: AuditRequest):
+        """Plan C: a `gs://` object. No browser, no login, no player to drive.
+
+        Deliberately short next to `_browser_session`. Nearly everything in
+        that method exists to deal with a page -- the login dance, the probe
+        race, the fullscreen fight, the CAPTCHA gate -- and none of it has an
+        analogue here. A file either reads or it does not.
+
+        No navigation budget either, for the same reason: the wall clock in
+        `_browser_session` guards a sequence of four page calls that can each
+        hang forever. Here there is one subprocess, and `open_source` already
+        bounds it.
+        """
+        work_dir = config.work_dir / f"run_{int(time.time() * 1000)}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._emit("navigating", {"target": request.target, "platform": "gcs"})
+            source = await gcs_video.open_source(request.target)
+            self.source = source
+            self._emit("capture_mode", {"mode": source.mode, "reason": source.reason})
+            yield _Session(
+                page=None,
+                context=None,
+                navigator=None,
+                source=source,
+                work_dir=work_dir,
+                platform="gcs",
+            )
+        finally:
+            if not config.keep_clips:
+                shutil.rmtree(work_dir, ignore_errors=True)
 
     @contextlib.asynccontextmanager
     async def _browser_session(self, request: AuditRequest, *, live_preview: bool = True):
@@ -512,12 +601,19 @@ class AuditPipeline:
 
     async def _preflight_inner(self, request: AuditRequest, job_id: str) -> PreflightResult:
         """The body of `preflight`. Raises; the caller turns that into a result."""
-        async with self._browser_session(request, live_preview=False) as session:
+        async with self._capture_session(request, live_preview=False) as session:
             duration = await self._video_duration(session)
-            cover = await self._cover_frame(session.page, job_id)
+            cover = await self._cover_frame(session, job_id, request.start_seconds)
             title = ""
-            with contextlib.suppress(Exception):
-                title = await session.page.title()
+            if session.has_page:
+                with contextlib.suppress(Exception):
+                    title = await session.page.title()
+            elif gcs_video.is_gcs_uri(request.target):
+                # The object name, not the whole URI: it is the part the
+                # customer recognises, and the bucket is the same for all of
+                # them anyway.
+                with contextlib.suppress(Exception):
+                    title = gcs_video.parse_gs_uri(request.target)[1]
 
             requested_end = request.end_seconds
             # One window of slack, matching `_coverage`: the last clip is cut on
@@ -530,7 +626,15 @@ class AuditPipeline:
             # Neither is a reason to refuse -- it is a reason not to claim.
             span_available = True
             problem: Optional[str] = None
-            if duration is not None:
+            # A whole-file run has no span to check. Both tests below ask "does
+            # the recording reach the moment you asked for", and on this path
+            # nobody asked for a moment: the whole object is going to the model
+            # whatever the customer typed. Running them anyway would reject a
+            # perfectly auditable video for a time range that is about to be
+            # ignored -- "视频只有 03:00 长，请求的起点 05:00 已经超出了视频末尾"
+            # on a video we are about to audit end to end.
+            whole_file = session.source.mode == "file"
+            if duration is not None and not whole_file:
                 if request.start_seconds >= duration:
                     # Nothing to audit at all. This is the one preflight outcome
                     # that has to be ok=False on a page that opened fine:
@@ -585,6 +689,12 @@ class AuditPipeline:
         """
         if session.source.duration_seconds:
             return session.source.duration_seconds
+        if not session.has_page:
+            # Plan C's only source of a duration is the probe above. If ffprobe
+            # could not read one, nothing else can, and there is no player to
+            # ask -- so say so rather than reaching through a None navigator
+            # and catching the AttributeError as if it meant something.
+            return None
         try:
             state = await session.navigator.read_playback_state(session.page)
         except Exception as exc:
@@ -600,21 +710,35 @@ class AuditPipeline:
         # check rather than admitting we do not know.
         return value if value and value != float("inf") else None
 
-    async def _cover_frame(self, page, job_id: str) -> Optional[str]:
+    async def _cover_frame(
+        self, session: "_Session", job_id: str, start_seconds: float = 0.0
+    ) -> Optional[str]:
         """A still of what we opened, so the customer can see it is their shop.
 
+        With a page that is a screenshot. With a file it is a frame decoded at
+        the requested start -- which is arguably the better picture of the two,
+        since it shows the moment the audit begins rather than whatever the
+        player happened to be displaying when the probe finished.
+
         Best effort on purpose: a preflight that can otherwise answer every
-        question is not worth failing over a screenshot.
+        question is not worth failing over a thumbnail.
         """
         try:
-            shot = await page.screenshot(type="jpeg", quality=config.preview_quality)
+            if session.has_page:
+                shot = await session.page.screenshot(
+                    type="jpeg", quality=config.preview_quality
+                )
+            else:
+                shot = await gcs_video.grab_frame(session.source, start_seconds)
+            if not shot:
+                return None
             return await artifact_sink().put(f"{job_id}/cover.jpg", shot, "image/jpeg")
         except Exception as exc:
             logger.warning("Could not capture a cover frame: %s", str(exc)[:200])
             return None
 
     async def run(self, request: AuditRequest) -> dict:
-        async with self._browser_session(request) as session:
+        async with self._capture_session(request) as session:
             page, navigator = session.page, session.navigator
             source, work_dir = session.source, session.work_dir
 
@@ -641,8 +765,16 @@ class AuditPipeline:
             # the same 84.3 KB still. The audit was fine and the operator was
             # staring at a frozen screen -- which is how you lose a demo while
             # every number on the dashboard says success.
-            watchdog = asyncio.create_task(
-                self._watch_page(page, navigator, page_is_source=source.mode == "screen")
+            # Nothing to mind on Plan C. The watchdog's whole job is the page:
+            # is it still playing, has a nag covered it, is Chromium still
+            # painting. With no page, a task that polls a None navigator would
+            # only produce a steady trickle of caught exceptions that look like
+            # a fault and are not.
+            watchdog = (
+                asyncio.create_task(
+                    self._watch_page(page, navigator, page_is_source=source.mode == "screen")
+                )
+                if session.has_page else None
             )
 
             try:
@@ -666,9 +798,10 @@ class AuditPipeline:
                     # operator watched a frozen still for the remaining 56
                     # seconds while the windows finished. The audit was
                     # perfect; the demo was not.
-                    watchdog.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await watchdog
+                    if watchdog is not None:
+                        watchdog.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await watchdog
 
         summary = {
             **self.store.summary(),
@@ -696,6 +829,28 @@ class AuditPipeline:
             if request.duration_seconds
             else None
         )
+        if self.source is not None and self.source.mode == "file":
+            # A whole-file run has no requested span to fall short of: the
+            # entire recording went to the model in one piece. Comparing the
+            # covered span against what the customer typed would report
+            # "只覆盖到 05:00，请求的是到 07:00" about a run that watched all
+            # thirty minutes -- an understatement, which is the one direction
+            # a coverage report must never err in.
+            return {
+                "requested_start_seconds": 0.0,
+                "requested_end_seconds": (
+                    round(self.source.duration_seconds, 1)
+                    if self.source.duration_seconds else None
+                ),
+                "covered_from_seconds": round(span[0], 1) if span else None,
+                "covered_to_seconds": round(span[1], 1) if span else None,
+                "stopped_kind": self._stop_kind,
+                "complete": span is not None,
+                "incomplete_reason": (
+                    None if span else "没有采集到任何可分析的片段"
+                ),
+                "whole_video": True,
+            }
         out = {
             "requested_start_seconds": round(request.start_seconds, 1),
             "requested_end_seconds": round(requested_end, 1) if requested_end else None,
@@ -740,6 +895,17 @@ class AuditPipeline:
         return out
 
     async def _build_producer(self, source, page, navigator, work_dir: Path, request: AuditRequest):
+        if source.mode == "file":
+            # Plan C. Nothing is cut, nothing is read: the object's address goes
+            # to Vertex and Vertex reads it. The requested time span is not
+            # honoured here and that is deliberate -- see `WholeFileProducer`
+            # for the measurement that made windowing this path wrong rather
+            # than merely wasteful. A file that needs cutting gets cut before it
+            # is put in the bucket.
+            return gcs_video.WholeFileProducer(
+                source, duration_seconds=source.duration_seconds
+            )
+
         if source.mode == "stream":
             # Purely for the operator: nothing here is recorded, but a
             # dashboard showing a postage-stamp player inside a page of
@@ -1076,7 +1242,13 @@ class AuditPipeline:
                 if self._stop.is_set():
                     self._emit("budget_stop", {"reason": self._stop_reason or "stop requested"})
                     break
-                if end_offset is not None and clip.start_offset >= end_offset:
+                # `whole_video` opts out: that clip *is* the recording, so a
+                # requested end it starts before or after says nothing about it.
+                if (
+                    end_offset is not None
+                    and not clip.whole_video
+                    and clip.start_offset >= end_offset
+                ):
                     reason = f"已采集到请求的终点 {Clip.format_offset(end_offset)}"
                     self.stop(reason, kind="requested")
                     self._emit("budget_stop", {"reason": reason})
@@ -1138,7 +1310,8 @@ class AuditPipeline:
             finally:
                 # Evidence frames are already extracted, so the clip has served
                 # its purpose. Multi-hour runs would otherwise fill the disk.
-                if clip is not None and not config.keep_clips:
+                # Nothing to delete when the bytes were never ours (Plan C).
+                if clip is not None and clip.path is not None and not config.keep_clips:
                     with contextlib.suppress(OSError):
                         clip.path.unlink(missing_ok=True)
                 queue.task_done()

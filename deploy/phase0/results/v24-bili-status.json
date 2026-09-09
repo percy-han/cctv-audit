@@ -1,0 +1,56 @@
+{
+  "message": {
+    "contextId": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6598913140882352256",
+    "role": "ROLE_AGENT",
+    "content": [
+      {
+        "text": "### 📊 稽核完成\n- 分析窗口：2 个\n- 稽核区间：00:30 - 02:27（请求 00:30 - 01:30）\n- 发现违规：2 项，其中红线 0 项\n- 判读情况：10 项检查中 5 项无法判定\n- 采集方式：stream，耗时 168.6s\n- 结束原因：已采集到请求的终点 01:30\n- Token：输入 92013，输出 5882\n- 明细：`Firestore[cctv-audit] cctv_audit_users/gce-automation-sa@study-project-496907.iam.gserviceaccount.com/jobs/85be2c/records`，证据帧：`gs://study-project-496907-cctv-audit/audits/evidence/85be2c`\n\n### ⚠️ 违规判定结果\n| 违规规则 | 相关时间范围 | 判定依据 | 严重程度 | 证据帧 |\n| :--- | :--- | :--- | :--- | :--- |\n| CHK_SANITATION_003 操作台与物料管理 | 00:30 - 01:30（定位 00:56）| 后厨水槽旁的操作台面上随意堆放着一块白底蓝边抹布，直接搭放在食品操作台面上，未置于专用抹布收纳盒或指定容器内。 | 一般缺陷（置信度 95%）| gs://study-project-496907-cctv-audit/audits/evidence/85be2c/w00000_CHK_SANITATION_003_0026.jpg |\n| CHK_SANITATION_003 操作台与物料管理 | 01:27 - 02:27（定位 01:28）| 水槽旁的不锈钢操作台面存在明显积水，且一块蓝白条纹抹布随意团放在台面食品操作区，未置于指定位置。 | 一般缺陷（置信度 95%）| gs://study-project-496907-cctv-audit/audits/evidence/85be2c/w00001_CHK_SANITATION_003_0001.jpg |\n\n\u003e 每个窗口的「视觉证据锚定」与完整动作描述记录在 JSONL 的 `visual_scan` / `action_narrative` 字段中，可用于复核判定是否有据。"
+      }
+    ],
+    "metadata": {
+      "dataSourceInfo": {
+        "selectionMode": "SELECTION_MODE_NONE"
+      },
+      "agentInfo": {
+        "displayName": "门店视频稽核",
+        "agent": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/assistants/default_assistant/agents/16091433261218097511"
+      },
+      "answer": {
+        "name": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6598913140882352256/assistAnswers/12146250249005757754",
+        "state": "SUCCEEDED",
+        "diagnosticInfo": {
+          "plannerSteps": [
+            {
+              "createTime": "2026-09-09T07:45:24.817405241Z",
+              "queryStep": {
+                "parts": [
+                  {
+                    "text": "好了吗"
+                  }
+                ]
+              }
+            },
+            {
+              "planStep": {
+                "role": "MODEL",
+                "parts": [
+                  {
+                    "text": "### 📊 稽核完成\n- 分析窗口：2 个\n- 稽核区间：00:30 - 02:27（请求 00:30 - 01:30）\n- 发现违规：2 项，其中红线 0 项\n- 判读情况：10 项检查中 5 项无法判定\n- 采集方式：stream，耗时 168.6s\n- 结束原因：已采集到请求的终点 01:30\n- Token：输入 92013，输出 5882\n- 明细：`Firestore[cctv-audit] cctv_audit_users/gce-automation-sa@study-project-496907.iam.gserviceaccount.com/jobs/85be2c/records`，证据帧：`gs://study-project-496907-cctv-audit/audits/evidence/85be2c`\n\n### ⚠️ 违规判定结果\n| 违规规则 | 相关时间范围 | 判定依据 | 严重程度 | 证据帧 |\n| :--- | :--- | :--- | :--- | :--- |\n| CHK_SANITATION_003 操作台与物料管理 | 00:30 - 01:30（定位 00:56）| 后厨水槽旁的操作台面上随意堆放着一块白底蓝边抹布，直接搭放在食品操作台面上，未置于专用抹布收纳盒或指定容器内。 | 一般缺陷（置信度 95%）| gs://study-project-496907-cctv-audit/audits/evidence/85be2c/w00000_CHK_SANITATION_003_0026.jpg |\n| CHK_SANITATION_003 操作台与物料管理 | 01:27 - 02:27（定位 01:28）| 水槽旁的不锈钢操作台面存在明显积水，且一块蓝白条纹抹布随意团放在台面食品操作区，未置于指定位置。 | 一般缺陷（置信度 95%）| gs://study-project-496907-cctv-audit/audits/evidence/85be2c/w00001_CHK_SANITATION_003_0001.jpg |\n\n\u003e 每个窗口的「视觉证据锚定」与完整动作描述记录在 JSONL 的 `visual_scan` / `action_narrative` 字段中，可用于复核判定是否有据。"
+                  }
+                ],
+                "planStepId": "8810382668438131941"
+              },
+              "createTime": "2026-09-09T07:45:27.947280349Z"
+            }
+          ]
+        }
+      },
+      "sessionInfo": {
+        "session": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6598913140882352256",
+        "queryId": "12146250249005759310",
+        "turnId": "6598913140882352256_12146250249005757897"
+      },
+      "assistToken": "NMwKDAiSnYTVBhCwlqWiAxIkNmE5ZjAwYzItMDAwMC0yNWVjLWEyZTMtNTgyNDI5YWE2ZjAw"
+    }
+  }
+}

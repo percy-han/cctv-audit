@@ -1,0 +1,56 @@
+{
+  "message": {
+    "contextId": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6624820223597720633",
+    "role": "ROLE_AGENT",
+    "content": [
+      {
+        "text": "### 📊 稽核完成\n- 分析窗口：2 个\n- 稽核区间：00:30 - 02:27（请求 00:30 - 01:30）\n- 发现违规：1 项，其中红线 0 项\n- 判读情况：10 项检查中 5 项无法判定\n- 采集方式：stream，耗时 108.7s\n- 结束原因：已采集到请求的终点 01:30\n- Token：输入 19336，输出 5286\n- 明细：`Firestore[cctv-audit] cctv_audit_users/gce-automation-sa@study-project-496907.iam.gserviceaccount.com/jobs/0b581f/records`，证据帧：`gs://study-project-496907-cctv-audit/audits/evidence/0b581f`\n\n### ⚠️ 违规判定结果\n| 违规规则 | 相关时间范围 | 判定依据 | 严重程度 | 证据帧 |\n| :--- | :--- | :--- | :--- | :--- |\n| CHK_SANITATION_003 操作台与物料管理 | 01:27 - 02:27（定位 01:29）| 水池旁的操作台食品接触区域随意堆放着一团未折叠归位的抹布，且旁侧操作台的金属物料盒内亦塞放抹布，未按规范分区归位摆放。 | 一般缺陷（置信度 95%）| gs://study-project-496907-cctv-audit/audits/evidence/0b581f/w00001_CHK_SANITATION_003_0002.jpg |\n\n\u003e 每个窗口的「视觉证据锚定」与完整动作描述记录在 JSONL 的 `visual_scan` / `action_narrative` 字段中，可用于复核判定是否有据。"
+      }
+    ],
+    "metadata": {
+      "answer": {
+        "diagnosticInfo": {
+          "plannerSteps": [
+            {
+              "createTime": "2026-09-09T08:00:46.229211925Z",
+              "queryStep": {
+                "parts": [
+                  {
+                    "text": "好了吗"
+                  }
+                ]
+              }
+            },
+            {
+              "planStep": {
+                "planStepId": "13431958994768998937",
+                "parts": [
+                  {
+                    "text": "### 📊 稽核完成\n- 分析窗口：2 个\n- 稽核区间：00:30 - 02:27（请求 00:30 - 01:30）\n- 发现违规：1 项，其中红线 0 项\n- 判读情况：10 项检查中 5 项无法判定\n- 采集方式：stream，耗时 108.7s\n- 结束原因：已采集到请求的终点 01:30\n- Token：输入 19336，输出 5286\n- 明细：`Firestore[cctv-audit] cctv_audit_users/gce-automation-sa@study-project-496907.iam.gserviceaccount.com/jobs/0b581f/records`，证据帧：`gs://study-project-496907-cctv-audit/audits/evidence/0b581f`\n\n### ⚠️ 违规判定结果\n| 违规规则 | 相关时间范围 | 判定依据 | 严重程度 | 证据帧 |\n| :--- | :--- | :--- | :--- | :--- |\n| CHK_SANITATION_003 操作台与物料管理 | 01:27 - 02:27（定位 01:29）| 水池旁的操作台食品接触区域随意堆放着一团未折叠归位的抹布，且旁侧操作台的金属物料盒内亦塞放抹布，未按规范分区归位摆放。 | 一般缺陷（置信度 95%）| gs://study-project-496907-cctv-audit/audits/evidence/0b581f/w00001_CHK_SANITATION_003_0002.jpg |\n\n\u003e 每个窗口的「视觉证据锚定」与完整动作描述记录在 JSONL 的 `visual_scan` / `action_narrative` 字段中，可用于复核判定是否有据。"
+                  }
+                ],
+                "role": "MODEL"
+              },
+              "createTime": "2026-09-09T08:00:49.707312368Z"
+            }
+          ]
+        },
+        "state": "SUCCEEDED",
+        "name": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6624820223597720633/assistAnswers/14594991006925757061"
+      },
+      "sessionInfo": {
+        "session": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6624820223597720633",
+        "queryId": "14594991006925757033",
+        "turnId": "6624820223597720633_14594991006925758064"
+      },
+      "assistToken": "NMwKDAirpITVBhDxl_mqAxIkNmFhMGI5MzktMDAwMC0yYWFkLThhY2MtNTgyNDI5YWRjYTE4",
+      "agentInfo": {
+        "displayName": "门店视频稽核",
+        "agent": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/assistants/default_assistant/agents/16091433261218097511"
+      },
+      "dataSourceInfo": {
+        "selectionMode": "SELECTION_MODE_NONE"
+      }
+    }
+  }
+}

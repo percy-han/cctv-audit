@@ -101,6 +101,81 @@ job e40125: done after 327s
 
 更早的对照：2026-09-04 老版本 68 秒跑完 2 处违规（演示素材，不是 bilibili）。
 
+## 3.5 Plan C：稽核桶里的一个视频文件（`gs://`）
+
+**这条路什么都不采集。** 对象地址直接交给 Vertex，字节不进容器，
+**整段视频一次分析完，不切片**（原因见 `CHANGES.md` 十二·九：agentic 会
+静默忽略时间偏移）。所以这里没有窗口数可数、没有采集耗时可比，
+也**没有实时画面**。
+
+**先决条件**：跑稽核的那个服务账号要在**放视频的那个桶**上有
+`roles/storage.objectViewer`。放在 `study-project-496907-cctv-audit` 就不用再授——
+引擎已经在从这个桶读 SOP、往里写证据帧。本地跑用的是你自己的 ADC，
+云上用的是引擎的服务账号，**两个身份不一样，本地通不代表云上通**。
+
+不用开浏览器，也不用模型，就能把 ffmpeg 那两件小事走完一遍：
+
+```bash
+PYTHONPATH=$PWD .venv/bin/python - <<'EOF'
+import asyncio
+from computer_use_agent.capture import gcs_video
+
+URI = "gs://study-project-496907-cctv-audit/你的路径/视频.mp4"
+
+async def main():
+    src = await gcs_video.open_source(URI)          # 探一下：在不在、多长
+    print(src.mode, src.duration_seconds, src.reason)
+    jpg = await gcs_video.grab_frame(src, 300.0)    # 第 5 分钟抽一帧
+    print("cover bytes:", len(jpg) if jpg else None)
+
+asyncio.run(main())
+EOF
+```
+
+`mode` 应该是 `file`，`duration_seconds` 要和 `ffprobe` 对得上。
+**读失败的时候看它说了什么**——403 应该明写要加哪个角色，404 应该提醒对象名区分大小写。
+只说 "Server returned 403 Forbidden" 就是没走到 `_explain`。
+
+整场稽核走第 3 节那套，把 `BILI_URL` 换成 `gs://...` 即可：
+`gs://` 走的是同一个 `AuditPipeline.run()`，只是 `_capture_session`
+把它路由到了不开浏览器的那条分支，producer 换成 `WholeFileProducer`。
+
+**要看的四件事**：
+
+1. GE 的确认回复里是 `采集方式：直接读文件（GCS）` +
+   `分析方式：agentic，整段视频一次看完，不切片` +
+   `要稽核：整段视频，从头看到尾`。**说了时间段的话，回复里要明说这次用不上。**
+2. 回「确认」之后的那句话里**没有「实时画面」这一行**。
+3. 只有一条窗口记录，`time_range` 是 `00:00 - <总长>`。
+4. 违规的证据截图有图——那是 `frame_at` 从桶里现切的，
+   **这是整条路上唯一还会碰字节的地方**，坏了只会表现为「报告里没图」。
+
+token 数值得记一笔：`AnalysisOutcome.input_tokens` 已经把
+`tool_use_prompt_token_count` 加进去了，agentic 抓的帧全在那一项里，
+只看 `prompt_token_count` 会少报八成。
+
+> **2026-09-09 云上跑过一次，单号 `ad345a`**（镜像 v23，
+> `gs://study-project-496907-cctv-audit/tmp/agentic-probe/store.mp4`，20 分钟）。
+> `capture_mode=file`、`analysis_scope=whole_file`、`start_audit` 0.45 秒返回、
+> 44.2 秒出报告、**1 个窗口 0 失败**、`time_range 00:00 - 20:00`、
+> 覆盖 0→1200 且 `complete=True`、输入 9799 / 输出 1682 token。
+> 封面帧确实从桶里切出来了（`audits/ad345a/cover.jpg`，10646 字节，真 JPEG），
+> 所以「ffmpeg 按字节区间读 GCS」这半段是通的。
+>
+> **第 4 件事在 2026-09-09 补验了，单号 `292712`**（镜像 v24，
+> `gs://study-project-496907-cctv-audit/poc-video/chagee-01.mp4`，5 分 02 秒，
+> 客户给的真实门店录像）。判出 4 条红线违规，`frame_at` 按模型给的时刻
+> 从桶里切了 4 张，全部落地：`audits/evidence/292712/w00000_*.jpg`，
+> 95 763 – 101 629 字节。**逐字节存在不等于切对了地方**，所以其中一张
+> （`CHK_BEHAVIOR_004_0293.jpg`，判定「员工看手机」）下载下来看过：
+> 画面里就是那个人双手举着粉色壳的手机低头看。**切的位置对得上判定。**
+> 之前那次（`ad345a`）验不了是因为素材是合成色块、一条违规都没有，
+> `frame_at` 压根没被调到。
+>
+> **还有一个数不知道：Vertex 一次能吃多长的视频。** 限制是时长不是文件大小，
+> 而这条路的前提就是「一次给一整段」。20 分钟已经证明可以，
+> 再往上拿客户那个真正的大文件探一次。
+
 ## 4. 看大屏收到了什么（不用浏览器）
 
 ```bash

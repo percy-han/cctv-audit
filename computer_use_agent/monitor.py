@@ -221,6 +221,26 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     /* Click Marker Radar Ripple */
+    /* Sits over the video, not beside it: the empty video panel is the thing
+       being explained, so the explanation has to be where the eye already is. */
+    .ended-banner {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      max-width: 80%;
+      padding: 14px 22px;
+      border-radius: 10px;
+      background: rgba(11, 15, 25, 0.88);
+      border: 1px solid #334155;
+      color: #cbd5e1;
+      font-size: 0.95rem;
+      line-height: 1.6;
+      text-align: center;
+      pointer-events: none;
+      z-index: 60;
+      display: none;
+    }
     .click-marker {
       position: absolute;
       width: 48px;
@@ -659,6 +679,11 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="canvas-wrapper" id="canvas-container">
         <img id="browser-screen" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080' viewBox='0 0 1920 1080'><rect width='100%' height='100%' fill='%230b0f19'/><text x='50%' y='50%' fill='%23475569' font-size='28' font-family='sans-serif' text-anchor='middle'>等待 CCTV 视频巡检 Agent 启动并同步视频画面...</text></svg>" alt="Browser Stream">
         
+        <!-- Says why the picture is not moving. Without it, a link opened after
+             the audit finished shows a blank panel that reads as a broken
+             dashboard. -->
+        <div id="ended-banner" class="ended-banner"></div>
+
         <!-- Animated Click Radar -->
         <div id="click-marker" class="click-marker">
           <div class="ring"></div>
@@ -847,6 +872,53 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
+    // Whether this run has already stopped, and when. Kept across state
+    // messages because a later partial update (a segment's `state` payload,
+    // say) must not be read as "the run resumed".
+    let endedAt = null;
+    let agoTimer = null;
+
+    function updateEndedBanner(s) {
+      const el = document.getElementById('ended-banner');
+      if (!el) return;
+      if (s.status === 'RUNNING') endedAt = null;
+      else if (s.finished_at) endedAt = s.finished_at;
+
+      const over = (s.status === 'COMPLETED' || s.status === 'ERROR');
+      if (!over) {
+        // Stopping the timer here, not just hiding: it holds the state object
+        // it was started with, so a run that starts again would have the old
+        // "已结束" put back over the live picture a minute later.
+        if (agoTimer) { clearInterval(agoTimer); agoTimer = null; }
+        el.style.display = 'none';
+        return;
+      }
+
+      // Frames are only ever live -- nothing is recorded and nothing replays.
+      // Whoever opens the link afterwards sees either the last frame that
+      // happened to be pushed, or the placeholder, and neither says why.
+      let when = '', ago = '';
+      if (endedAt) {
+        // Local clock, because it is being read off a laptop next to a wall
+        // clock. But the container and every log line are UTC, so on a CST
+        // desk this reads eight hours away from the timestamps the same
+        // person greps -- hence the relative age next to it, which is true
+        // in any timezone.
+        const t = new Date(endedAt * 1000);
+        const pad = (n) => String(n).padStart(2, '0');
+        when = `已于 ${pad(t.getHours())}:${pad(t.getMinutes())} `;
+        const mins = Math.floor((Date.now() / 1000 - endedAt) / 60);
+        ago = mins < 1 ? '（刚刚）' : (mins < 60 ? `（${mins} 分钟前）` : `（${Math.floor(mins / 60)} 小时前）`);
+      }
+      const how = s.status === 'ERROR' ? '中断' : '结束';
+      el.textContent = `这场稽核${when}${how}了${ago}，没有实时画面。`
+                     + '下方的巡检结果和证据截图是完整的。';
+      el.style.display = 'block';
+      // Nothing arrives after a run ends, so without this the "刚刚" that was
+      // true when the banner appeared stays on screen for the rest of the day.
+      if (!agoTimer) agoTimer = setInterval(() => updateEndedBanner(s), 60000);
+    }
+
     function updateState(s) {
       if (!s) return;
       statusBadge.className = 'badge';
@@ -877,6 +949,8 @@ HTML_PAGE = """<!DOCTYPE html>
       if (s.final_result) {
         resultDisplay.textContent = s.final_result;
       }
+
+      updateEndedBanner(s);
 
       if (s.video_segments && s.video_segments.length > 0) {
         segmentsData = s.video_segments;

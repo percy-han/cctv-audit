@@ -12,11 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Video acquisition: turn a playing web page into a stream of MP4 clips."""
+"""Video acquisition: turn a video -- a web page's or a file's -- into MP4 clips."""
 
 from .types import Clip, CaptureSource
 from .probe import StreamProbe
 from .stream_grabber import StreamGrabber
 from .screen_recorder import ScreenRecorder
+from .gcs_video import BadGcsUri, is_gcs_uri, parse_gs_uri
 
-__all__ = ["Clip", "CaptureSource", "StreamProbe", "StreamGrabber", "ScreenRecorder"]
+__all__ = [
+    "Clip", "CaptureSource", "StreamProbe", "StreamGrabber", "ScreenRecorder",
+    "BadGcsUri", "is_gcs_uri", "parse_gs_uri",
+]

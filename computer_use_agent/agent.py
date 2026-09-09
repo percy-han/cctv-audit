@@ -79,6 +79,10 @@ def _preview_caption(mode: str) -> tuple:
     to do with the window being judged. Saying so beats an operator watching
     minute one while the report scrolls past minute five.
     """
+    if mode == "file":
+        return ("直接读文件中（Plan C）",
+                "这次没有网页也没有采集，整段视频交给模型通篇看；"
+                "这里没有实时画面，证据截图照常显示")
     if mode == "stream":
         return ("抓流中（Plan A）",
                 "画面仅供参考：视频正由 ffmpeg 直接下载分析，进度与这里的播放位置无关")
@@ -126,6 +130,42 @@ def _span(summary: dict) -> str:
         return covered
     requested_start = summary.get("requested_start_seconds") or 0.0
     return f"{covered}（请求 {fmt(requested_start)} - {fmt(requested_end)}）"
+
+
+def _undetermined(summary: dict) -> int:
+    """How many rule checks the model declined to call either way."""
+    return int(summary.get("checks_undetermined") or 0)
+
+
+def _read_nothing(summary: dict) -> bool:
+    """True when not a single rule anywhere got a real verdict.
+
+    Read off the counts rather than off `windows_unreadable`, because the two
+    can disagree honestly: a model can call a window readable and still answer
+    CANNOT_DETERMINE on every rule in it (nobody walked into shot). What decides
+    whether a report may claim anything is whether any rule was actually judged.
+    """
+    total = int(summary.get("checks_total") or 0)
+    return total > 0 and _undetermined(summary) == total
+
+
+def _readability_line(summary: dict) -> str:
+    """States how much of the footage was judged, in the numbers line.
+
+    Present on every report, including clean ones. A field that only appears
+    when something is wrong is a field nobody learns to look for.
+    """
+    total = int(summary.get("checks_total") or 0)
+    if not total:
+        return "没有可判读的检查项"
+    undetermined = _undetermined(summary)
+    unreadable = int(summary.get("windows_unreadable") or 0)
+    blurred = f"，其中 {unreadable} 个窗口画面判读不了" if unreadable else ""
+    if not undetermined:
+        return f"{total} 项检查全部判读完成"
+    if undetermined == total:
+        return f"{total} 项检查**全部无法判定**{blurred}"
+    return f"{total} 项检查中 {undetermined} 项无法判定{blurred}"
 
 
 class CctvAuditAgent(BaseAgent):
@@ -278,6 +318,7 @@ class CctvAuditAgent(BaseAgent):
         # bucket, the filename setting is no longer what is in force.
         return (
             f"🎬 开始稽核 `{request.target}`（{span}）{note}\n\n"
+            f"分析方式 {config.media_processing}（{config.analysis_model}），"
             f"窗口 {config.window_seconds}s / 重叠 {config.window_overlap_seconds}s，"
             f"抽帧 {config.analysis_fps} FPS，画质档 {config.media_resolution}，"
             f"并发 {config.analysis_concurrency}。\n"
@@ -289,7 +330,10 @@ class CctvAuditAgent(BaseAgent):
     @staticmethod
     def _format(event: str, payload: dict) -> Optional[str]:
         if event == "capture_mode":
-            label = "抓流（Plan A）" if payload["mode"] == "stream" else "录屏（Plan B）"
+            label = {
+                "stream": "抓流（Plan A）",
+                "file": "直接读文件（Plan C）",
+            }.get(payload["mode"], "录屏（Plan B）")
             return f"📡 采集方式：{label} — {payload['reason']}"
         if event == "window":
             mark = {"VIOLATION": "❌", "CANNOT_DETERMINE": "❔"}.get(payload["status"], "✅")
@@ -349,6 +393,7 @@ class CctvAuditAgent(BaseAgent):
             + (f"（{summary['windows_failed']} 个失败）" if summary["windows_failed"] else ""),
             f"- 稽核区间：{_span(summary)}",
             f"- 发现违规：{summary['violations']} 项，其中红线 {summary['red_line_violations']} 项",
+            f"- 判读情况：{_readability_line(summary)}",
             f"- 采集方式：{summary['capture_mode']}，耗时 {summary['elapsed_seconds']}s",
             f"- 结束原因：{summary['stopped_because']}",
             f"- Token：输入 {summary['input_tokens']}，输出 {summary['output_tokens']}",
@@ -394,8 +439,25 @@ class CctvAuditAgent(BaseAgent):
                     f"\n> 表里只列了时间最早的 {len(shown)} 个窗口，本次共 {total} 个窗口有违规。"
                     f"完整清单在 `{summary['records_path']}`。"
                 )
+        elif _read_nothing(summary):
+            # The green tick used to print here too. "0 violations" and "the
+            # model said it could not see anything" are opposite findings that
+            # counted the same, because the count only looked for VIOLATION
+            # rows. With Plan C that stopped being a rounding error: the whole
+            # video is one window, so an unreadable window is an unreadable
+            # audit, still reported as a pass.
+            lines.append(
+                "\n🚫 **本次没有得出结论**：画面判读不了（模型对每条规则都答了「无法判定」），"
+                "所以既不能说合规，也不能说违规。换一段能看清操作过程的录像再跑一次。"
+            )
+        elif _undetermined(summary):
+            lines.append(
+                f"\n⚠️ **未发现违规，但有 {_undetermined(summary)} 项没能判读**"
+                f"（共 {summary.get('checks_total', 0)} 项检查）。"
+                "没判读的部分既没有通过，也没有不通过。"
+            )
         else:
-            lines.append("\n✅ 未发现违反 SOP 的行为。")
+            lines.append("\n✅ 未发现违反 SOP 的行为（全部规则均已判读）。")
         lines.append(
             "\n> 每个窗口的「视觉证据锚定」与完整动作描述记录在 JSONL 的 "
             "`visual_scan` / `action_narrative` 字段中，可用于复核判定是否有据。"

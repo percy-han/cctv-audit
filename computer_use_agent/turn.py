@@ -57,6 +57,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, ValidationError
 
 from .analyzer.schema import _inline_refs
+from .capture import gcs_video
 from .config import config
 
 logger = logging.getLogger("cctv_audit.turn")
@@ -66,6 +67,11 @@ logger = logging.getLogger("cctv_audit.turn")
 # Twenty seconds is already a long silence; past that, saying "say that again"
 # is better than making them wait.
 _TIMEOUT_SECONDS = 20.0
+
+# Per attempt, not for all of them together. Two 20s tries still answer inside
+# GE's 602s window with room to spare, and they turn the common failure -- one
+# slow call -- from a dead end into a pause.
+_INTENT_ATTEMPTS = 2
 
 # How much of the conversation to show the model. GE replays the whole thread
 # on every turn, including rounds this container never saw, and a long thread
@@ -95,7 +101,8 @@ class _Decision(BaseModel):
     target_url: str = Field(
         default="",
         description=(
-            "action=audit 时，要稽核的视频地址。必须逐字符照抄对话里出现过的地址，"
+            "action=audit 时，要稽核的视频地址。网页地址（http/https 开头）和"
+            "存储桶里的视频文件地址（gs:// 开头）都算。必须逐字符照抄对话里出现过的地址，"
             "不得改写、补全或臆造。对话里没有就留空"
         ),
     )
@@ -169,6 +176,9 @@ _SYSTEM_INSTRUCTION = """\
    在「开跑一场几十分钟的稽核」和「查一下进度」之间猜错，代价不对等：
    猜成 audit 会白跑一场并且重复问用户要不要确认，让人以为产品坏了。
 2. 网址逐字符照抄，包括查询参数。不要补全、不要改写、不要凭印象生成地址。
+   **两种地址都算数**：网页地址（http/https 开头），以及存储桶里的视频文件地址
+   （gs:// 开头，例如 gs://某个桶/sop/开店流程.mp4）。后者是客户自己上传的录像，
+   照抄就行，不要试图把它改写成网页地址。
    如果这轮没给网址但**上文出现过**一个，而用户明显是在补充时间段，
    那就照抄上文那个网址。
 3. 时间一律换算成「相对视频开头的秒数」。
@@ -265,18 +275,33 @@ async def read_intent(turn: Turn) -> _Decision:
     if not turn.text.strip() and not turn.history:
         return _Decision(action="unclear", question="没收到内容，麻烦再说一遍要稽核哪个视频。")
 
-    try:
-        decision = await asyncio.wait_for(_ask_model(turn), timeout=_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError as exc:
-        raise ModelUnavailable(
-            f"读取意图超时（{_TIMEOUT_SECONDS:.0f} 秒）"
-        ) from exc
-    except ModelUnavailable:
-        raise
-    except Exception as exc:
-        raise ModelUnavailable(f"读取意图失败：{str(exc)[:200]}") from exc
+    # `_ask_model` already retries, but those retries used to live *inside* a
+    # single 20s budget, so one slow first attempt consumed the lot and the
+    # retries never ran. Measured 2026-09-09: a turn died on
+    # "读取意图超时（20 秒）" and the identical sentence, sent again a few minutes
+    # later, parsed fine -- the customer was told his sentence was unreadable
+    # when the truth was that we gave up waiting. The budget is now per attempt.
+    last: Optional[BaseException] = None
+    for attempt in range(_INTENT_ATTEMPTS):
+        try:
+            decision = await asyncio.wait_for(_ask_model(turn), timeout=_TIMEOUT_SECONDS)
+            return _validate(decision, turn)
+        except asyncio.TimeoutError as exc:
+            last = exc
+            logger.warning(
+                "Reading the turn timed out after %.0fs (attempt %d of %d).",
+                _TIMEOUT_SECONDS, attempt + 1, _INTENT_ATTEMPTS)
+        except ModelUnavailable:
+            # The model answered, and the answer was unusable. Asking the same
+            # question again gets the same answer; only a timeout is worth a
+            # second go.
+            raise
+        except Exception as exc:
+            raise ModelUnavailable(f"读取意图失败：{str(exc)[:200]}") from exc
 
-    return _validate(decision, turn)
+    raise ModelUnavailable(
+        f"读取意图超时（每次 {_TIMEOUT_SECONDS:.0f} 秒，试了 {_INTENT_ATTEMPTS} 次）"
+    ) from last
 
 
 async def _ask_model(turn: Turn) -> _Decision:
@@ -344,6 +369,15 @@ def _validate(decision: _Decision, turn: Turn) -> _Decision:
                 "换个说法就行，例如「14:00 到 15:00」或者「从 01:00 开始看 5 分钟」。"
             ),
         })
+
+    # A `gs://` object is read whole, in one request, and the span is discarded
+    # on the way through (`analysis_scope == "whole_file"`). Asking for one is
+    # not merely a wasted turn: whatever the customer answers gets ignored, and
+    # the confirmation two lines later says so out loud -- "你说的 00:00 - 05:00
+    # 这次用不上". The questions below exist to stop an *open-ended page* audit
+    # from running for an hour; a bucket object has a known, bounded length.
+    if gcs_video.is_gcs_uri(url):
+        return decision.model_copy(update={"target_url": url})
 
     # An audit with no end is not a smaller audit -- it is the whole recording,
     # and it runs until the hour-long wall-clock budget stops it. There used to

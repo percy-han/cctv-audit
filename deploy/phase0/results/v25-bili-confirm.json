@@ -1,0 +1,56 @@
+{
+  "message": {
+    "contextId": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6624820223597720633",
+    "role": "ROLE_AGENT",
+    "content": [
+      {
+        "text": "好，开始稽核了，单号 `0b581f`。\n实时画面：https://cctv-monitor-c72222uunq-uc.a.run.app/?job=0b581f\n这一步要跑一段时间，你随时回「好了吗」查进度，跑完我把报告给你。"
+      }
+    ],
+    "metadata": {
+      "sessionInfo": {
+        "session": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6624820223597720633",
+        "queryId": "3426929849373744853",
+        "turnId": "6624820223597720633_3426929849373743026"
+      },
+      "agentInfo": {
+        "displayName": "门店视频稽核",
+        "agent": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/assistants/default_assistant/agents/16091433261218097511"
+      },
+      "assistToken": "NMwKDAjDooTVBhCMhsqKAhIkNmE5ZjAxOWQtMDAwMC0yNWVjLWEyZTMtNTgyNDI5YWE2ZjAw",
+      "answer": {
+        "diagnosticInfo": {
+          "plannerSteps": [
+            {
+              "queryStep": {
+                "parts": [
+                  {
+                    "text": "确认"
+                  }
+                ]
+              },
+              "createTime": "2026-09-09T07:56:52.229881693Z"
+            },
+            {
+              "planStep": {
+                "planStepId": "17004461473478309547",
+                "role": "MODEL",
+                "parts": [
+                  {
+                    "text": "好，开始稽核了，单号 `0b581f`。\n实时画面：https://cctv-monitor-c72222uunq-uc.a.run.app/?job=0b581f\n这一步要跑一段时间，你随时回「好了吗」查进度，跑完我把报告给你。"
+                  }
+                ]
+              },
+              "createTime": "2026-09-09T07:56:56.740520893Z"
+            }
+          ]
+        },
+        "name": "projects/596821501265/locations/global/collections/default_collection/engines/cctv-audit/sessions/6624820223597720633/assistAnswers/3426929849373741641",
+        "state": "SUCCEEDED"
+      },
+      "dataSourceInfo": {
+        "selectionMode": "SELECTION_MODE_NONE"
+      }
+    }
+  }
+}

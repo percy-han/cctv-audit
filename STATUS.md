@@ -17,8 +17,8 @@ bilibili 也跑通了，你报的「弹登录框之后大屏不动了」也修�
 
 | 组件 | 位置 | 镜像 / 版本 |
 | :--- | :--- | :--- |
-| 稽核引擎 | Agent Runtime `.../reasoningEngines/6844158066963775488` | **`agent:v31`**（2026-09-09，实例 `...-00025-5sq`） |
-| 大屏 | Cloud Run `cctv-monitor`（us-central1，`minScale=maxScale=1`） | **`agent:v31`**（revision `cctv-monitor-00012-hzf`） |
+| 稽核引擎 | Agent Runtime `.../reasoningEngines/6844158066963775488` | **`agent:v32`**（2026-09-10 09:23 UTC；实例号这次没抓到，日志里没出现那行） |
+| 大屏 | Cloud Run `cctv-monitor`（us-central1，`minScale=maxScale=1`） | **`agent:v32`**（revision `cctv-monitor-00013-mls`） |
 | 演示视频 | Cloud Run `cctv-demo-video` | — |
 | GE agent | 应用 `cctv-audit` 下 `agents/16091433261218097511`「门店视频稽核」 | — |
 
@@ -54,8 +54,11 @@ bilibili 也跑通了，你报的「弹登录框之后大屏不动了」也修�
    （排掉 `deploy/demovideo/assets/` 那 200 多个测试素材，它们不在 git 里）。
    v29 就是这么查出来还差着 `server.py` 那 44 行的。
 2. **比线上真发出来的字节。** 带 ID token 抓大屏页面，和本地 `HTML_PAGE`
-   逐字节比——40143 : 40143，**完全一致**。上一次就是这么抓到 `ADK Web`
+   逐字节比——**完全一致**。上一次就是这么抓到 `ADK Web`
    还留在一句 HTML 注释里的：注释也会发到浏览器，view-source 看得见。
+   （这里原先记的是「40143 : 40143」，**那个数是错的**。`monitor.py` 从
+   `9444cbc` 起就没动过，v31 和 v32 量出来都是 **41251**。两边一致这个结论没变，
+   错的只是数字本身。）
 
 计时日志云上验过了：
 
@@ -67,6 +70,27 @@ bilibili 也跑通了，你报的「弹登录框之后大屏不动了」也修�
 
 **引擎换了实例，bilibili 的 session 已经重新暖过**（单 `f97a1e`，标题读到、
 封面截到、ffprobe 直接打开了媒体轨，没撞 412）。那单停在「等确认」，不会自己跑。
+
+### 2026-09-10 改包名，v32（两边同时）
+
+`computer_use_agent` → `cctv_audit`，README 挪到仓库根。**没有行为改动**，
+但包名是两个启动命令的一部分，所以两个面必须一起部。原委见 `CHANGES.md` 十二·十二。
+
+这次不能靠单测收工——**测试导入的是包，不是启动命令**，改错了它一个都不红。
+所以三个入口是单独 import 验的，然后云上又各验了一次：
+
+| 验的是什么 | 结果 |
+| :--- | :--- |
+| 三个入口能不能 import 到 app | `cctv_audit.server:app` ✅ / `cctv_audit.monitor_server:app` ✅ / `cctv_audit.agent:root_agent` ✅ |
+| 引擎真的在跑 v32 | `containerSpec.imageUri = agent:v32`，`:query get_status` 1.06s 正常路由 |
+| 大屏真的在跑 v32 | revision `cctv-monitor-00013-mls`；线上页面 41251 字节，和本地 `HTML_PAGE` **逐字节一致** |
+| bilibili session | 重新暖过，单 `8c9fc1`，`state=ready`，22.7s，**没撞 412**。那单停在「等确认」 |
+
+两个名字**看着像改了其实没改**，专门查过，改了会出大事：
+
+- **Firestore 集合根 `cctv_audit_users`**（`config.py` 的 `jobs_collection` 默认值）
+  ——它一直就叫这个。真被 sed 扫中的话，线上**所有历史单子会全部失联**。
+- **ADK agent 名 `cctv_audit_agent`**（`agent.py:469`）——同样一直是这个。
 
 ### 2026-09-09 早些时候那次部署带上去的东西
 

@@ -31,9 +31,9 @@ import logging
 
 import pytest
 
-from computer_use_agent import server
-from computer_use_agent.jobs import BackgroundRunner, Job, MemoryJobStore
-from computer_use_agent.turn import _Decision, Turn, read_turn
+from cctv_audit import server
+from cctv_audit.jobs import BackgroundRunner, Job, MemoryJobStore
+from cctv_audit.turn import _Decision, Turn, read_turn
 
 
 # -- helpers -----------------------------------------------------------------
@@ -318,7 +318,7 @@ class TestWhenTheTurnCannotBeRead:
     async def test_the_model_being_down_does_not_become_a_guess(
         self, service, monkeypatch
     ):
-        from computer_use_agent.turn import ModelUnavailable
+        from cctv_audit.turn import ModelUnavailable
 
         async def boom(_turn):
             raise ModelUnavailable("Vertex 连不上")
@@ -337,7 +337,7 @@ class TestWhenTheTurnCannotBeRead:
         re-sent minutes later parsed fine. The retries `_ask_model` already does
         were inside the timeout, so the budget was gone before they ran.
         """
-        import computer_use_agent.turn as turn_mod
+        import cctv_audit.turn as turn_mod
 
         calls = []
 
@@ -358,8 +358,8 @@ class TestWhenTheTurnCannotBeRead:
 
     @pytest.mark.asyncio
     async def test_a_model_that_answers_nonsense_is_not_retried(self, monkeypatch):
-        import computer_use_agent.turn as turn_mod
-        from computer_use_agent.turn import ModelUnavailable
+        import cctv_audit.turn as turn_mod
+        from cctv_audit.turn import ModelUnavailable
 
         calls = []
 
@@ -380,7 +380,7 @@ class TestWhenTheTurnCannotBeRead:
     async def test_a_timeout_says_it_timed_out_not_that_you_were_unclear(
         self, service, monkeypatch
     ):
-        from computer_use_agent.turn import ModelUnavailable
+        from cctv_audit.turn import ModelUnavailable
 
         async def timed_out(_turn):
             raise ModelUnavailable("读取意图超时（每次 20 秒，试了 2 次）")
@@ -419,7 +419,7 @@ class TestWhenTheTurnCannotBeRead:
 class TestTheModelReadsButDoesNotInvent:
 
     def test_a_url_nobody_typed_is_refused(self):
-        from computer_use_agent.turn import _validate
+        from cctv_audit.turn import _validate
 
         turn = Turn(text="稽核一下那个店", session_id="s", user_id="u")
         out = _validate(
@@ -431,7 +431,7 @@ class TestTheModelReadsButDoesNotInvent:
         assert out.target_url == ""
 
     def test_a_url_from_an_earlier_turn_is_allowed(self):
-        from computer_use_agent.turn import _validate
+        from cctv_audit.turn import _validate
 
         turn = Turn(
             text="看 14:00 到 15:00", session_id="s", user_id="u",
@@ -445,7 +445,7 @@ class TestTheModelReadsButDoesNotInvent:
         assert out.action == "audit" and out.target_url == "https://x/v"
 
     def test_an_unreadable_span_becomes_a_question_not_a_default(self):
-        from computer_use_agent.turn import _validate
+        from cctv_audit.turn import _validate
 
         turn = Turn(text="https://x/v 最后五分钟", session_id="s", user_id="u")
         out = _validate(
@@ -459,7 +459,7 @@ class TestTheModelReadsButDoesNotInvent:
         assert "。。" not in out.question
 
     def test_a_missing_time_span_is_a_question_not_the_whole_video(self):
-        from computer_use_agent.turn import _validate
+        from cctv_audit.turn import _validate
 
         # There used to be a rule telling the model to read "no time mentioned"
         # as start 0, end -1. That is not a smaller audit -- it is the entire
@@ -478,7 +478,7 @@ class TestTheModelReadsButDoesNotInvent:
         assert "05:00" in out.question
 
     def test_a_start_with_no_end_is_asked_about_too(self):
-        from computer_use_agent.turn import _validate
+        from cctv_audit.turn import _validate
 
         # Same disease as above: "从 05:00 开始看" has no end either, and
         # `from_fields` turns a missing end into "watch to the end of the tape".
@@ -493,7 +493,7 @@ class TestTheModelReadsButDoesNotInvent:
         assert "05:00" in out.question and "看到哪为止" in out.question
 
     def test_a_stated_span_still_goes_straight_through(self):
-        from computer_use_agent.turn import _validate
+        from cctv_audit.turn import _validate
 
         # The other half of the same rule: the chips customers actually click
         # ("05:00 到 07:00") must not acquire a confirmation step.
@@ -507,7 +507,7 @@ class TestTheModelReadsButDoesNotInvent:
         assert out.action == "audit"
 
     def test_a_bucket_object_is_never_asked_for_a_time_span(self):
-        from computer_use_agent.turn import _validate
+        from cctv_audit.turn import _validate
 
         # Measured 2026-09-09 in GE: "稽核视频的全部内容 gs://.../chagee-01.mp4"
         # was answered with "从 00:00 开始，看到哪为止？", twice, and the span the
@@ -525,7 +525,7 @@ class TestTheModelReadsButDoesNotInvent:
         assert out.target_url == uri
 
     def test_a_bucket_object_with_a_start_but_no_end_also_goes_through(self):
-        from computer_use_agent.turn import _validate
+        from cctv_audit.turn import _validate
 
         # The second gate, which is the one Percy actually hit: the model read
         # "从头看" as start 0 / end -1 and the open-ended check bounced it.
@@ -540,7 +540,7 @@ class TestTheModelReadsButDoesNotInvent:
         assert out.action == "audit"
 
     def test_a_web_page_with_no_span_is_still_asked(self):
-        from computer_use_agent.turn import _validate
+        from cctv_audit.turn import _validate
 
         # The exemption is for bucket objects only. An open-ended audit of a
         # *page* still runs until the hour-long budget stops it, which is the
@@ -553,7 +553,7 @@ class TestTheModelReadsButDoesNotInvent:
         assert out.action == "unclear"
 
     def test_an_action_outside_the_four_becomes_unclear(self):
-        from computer_use_agent.turn import _validate
+        from cctv_audit.turn import _validate
 
         turn = Turn(text="whatever", session_id="s", user_id="u")
         out = _validate(_Decision(action="cancel_everything"), turn)
@@ -616,7 +616,7 @@ class TestTheContainerCanBeSeen:
     def test_an_info_line_from_the_pipeline_reaches_a_handler(self, capsys, monkeypatch):
         import logging
 
-        from computer_use_agent.logsetup import setup_logging
+        from cctv_audit.logsetup import setup_logging
 
         monkeypatch.setenv("LOG_FORMAT", "text")
         setup_logging(force=True)
@@ -629,7 +629,7 @@ class TestTheContainerCanBeSeen:
     ):
         import logging
 
-        from computer_use_agent.logsetup import setup_logging
+        from cctv_audit.logsetup import setup_logging
 
         monkeypatch.setenv("LOG_FORMAT", "text")
         setup_logging(force=True)
@@ -648,7 +648,7 @@ class TestTheContainerCanBeSeen:
         import json as _json
         import logging
 
-        from computer_use_agent.logsetup import setup_logging
+        from cctv_audit.logsetup import setup_logging
 
         monkeypatch.delenv("LOG_FORMAT", raising=False)
         monkeypatch.setenv("K_REVISION", "agent-v12-abc")
@@ -666,7 +666,7 @@ class TestTheContainerCanBeSeen:
         import json as _json
         import logging
 
-        from computer_use_agent.logsetup import setup_logging
+        from cctv_audit.logsetup import setup_logging
 
         monkeypatch.delenv("LOG_FORMAT", raising=False)
         monkeypatch.setenv("K_REVISION", "agent-v12-abc")
@@ -686,7 +686,7 @@ class TestTheContainerCanBeSeen:
     def test_calling_it_twice_does_not_double_every_line(self, capsys, monkeypatch):
         import logging
 
-        from computer_use_agent.logsetup import setup_logging
+        from cctv_audit.logsetup import setup_logging
 
         monkeypatch.setenv("LOG_FORMAT", "text")
         setup_logging(force=True)

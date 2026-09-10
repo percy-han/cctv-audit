@@ -813,7 +813,7 @@ ValueError: Invalid configuration:
 
 这 11 个测试会真的构造 `AuditPipeline`，而 `__init__`（`pipeline.py:268`）
 先跑 `config.validate()`，没有项目就拒绝建。项目从哪来的？
-`computer_use_agent/.env`——**那个文件在 `.gitignore` 里**，因为它是某个人的本机设置。
+`cctv_audit/.env`——**那个文件在 `.gitignore` 里**，因为它是某个人的本机设置。
 
 所以这套测试在这台机器上全绿、在任何别的地方全红，**而且这样过了六天没人发现**。
 原因是 `./check.sh` 在**当前目录**跑测试，`.env` 就在旁边；只有 `--deep` 是站在
@@ -835,7 +835,7 @@ os.environ["GCP_PROJECT"] = "test-project-not-a-real-one"
   所以它能盖过一份设了后者的 `.env`。
 - **import 期赋值，不是 fixture。** `config` 是模块级的冻结 dataclass
   （`config.py:439` 的 `config = Config()`），collection 一 import
-  `computer_use_agent.config` 就定型了，fixture 那时候已经晚了。
+  `cctv_audit.config` 就定型了，fixture 那时候已经晚了。
 
 代价是「缺项目就报错」这条分支再没别的测试走得到，所以在
 `TestWhichProjectWeAreIn` 里补了一条直接断言 `Config(gcp_project="").validate()`
@@ -851,6 +851,61 @@ os.environ["GCP_PROJECT"] = "test-project-not-a-real-one"
 一个每次都误报的检查，等于没有这个检查。
 
 单测 478 → 480。
+
+## 十二·十二、包名从 `computer_use_agent` 改成 `cctv_audit`；README 挪到仓库根（2026-09-10）
+
+### 旧名字指的是一条兜底路径
+
+`computer_use_agent` 是第一轮之前留下的名字，那时候每一步导航都靠 Computer Use 点。
+现在它只是**确定性导航失败时才启动的兜底**——`navigator/resilient.py` 先跑
+`bilibili.py` 的 Playwright 选择器，抛异常了才轮到 `generic_agent.py` 里的
+`ComputerUseFallback`，而且它**只做导航，不做任何稽核判定**。
+
+拿一条兜底路径给整个包命名是反的。新名字和仓库名、GCS bucket、Artifact Registry
+仓库名对齐——那三个本来就都叫 `cctv-audit`。
+
+**没动的**：`deploy/` 的目录结构（本来就是一个目录一种云资源）、包内部的文件分组、
+Firestore 集合根 `cctv_audit_users`（它一直就叫这个，不是这次改的——
+真改了会让线上所有历史单子失联）。
+
+### 改这个名字最危险的地方是它在启动命令里
+
+包名是**容器启动命令的一部分**，而且写在**两个互不相干的文件**里：
+
+- `Dockerfile:69` — `uvicorn cctv_audit.server:app`，引擎
+- `deploy/dashboard/deploy.py:125` — `uvicorn cctv_audit.monitor_server:app`，大屏
+
+漏改任何一个，那个面就起不来，而且**单测一个都不会红**——测试导入的是包，
+不是启动命令。这跟 9 号那次引擎 v29 / 大屏 v30 的分叉是同一个形状。
+所以这次改完是**两个都重部 + 各验一次**，不是跑完测试就收工。
+
+### 顺序有个坑：`.gitignore` 必须跟着一起改
+
+`git mv` 会把整个目录搬走，**包括里面被忽略的 `checkpoints/`、`.env`、`.adk`**。
+`.gitignore` 里写的是 `computer_use_agent/checkpoints/`，路径一变就不再匹配，
+下一次 `git add -A` 会把**带可识别人脸的证据帧**直接提交上去。
+所以 `.gitignore` / `.dockerignore` / `.gcloudignore` 三个文件是紧跟着 `git mv`
+改的，中间没有 `git add`，改完先 `git status --ignored` 确认那三样还在被忽略。
+
+### 本地 `.env` 也要改，而且只有本地会红
+
+改完第一次跑测试是 **22 failed**，全是
+`SOP_RULES_PATH does not exist: .../computer_use_agent/analyzer/...`。
+来源是 `cctv_audit/.env` 里那行相对路径——**那个文件不在 git 里**，
+所以新 clone 反而不会遇到这个。和「十二·十一」正好是同一件事的两面：
+本机有而仓库没有的文件，两个方向的偏差都得自己找。
+
+### README 从包目录挪到仓库根
+
+`computer_use_agent/README.md` 是 434 行的完整说明——架构图、Plan A/B/C、
+设计取舍全在里面，结果 GitHub 主页一片空白。现在它是 `README.md`，并且补了两块：
+
+- **新的第零节「这东西部署在哪」**：三个部署物共用一个镜像、各自的启动命令和部署脚本，
+  外加一张「别的文档在哪」的索引。以前这件事只能靠 `Dockerfile` 顶部的注释解释。
+- **第七节的目录树重写**：原来那棵树漏了 `server.py`、`turn.py`、`audit_service.py`、
+  `jobs.py` 等第二轮新增的一半文件，也没有 `deploy/`。现在三个入口用 ★ 标出来。
+
+单测 480，不变——这一轮没有行为改动。
 
 ## 十三、和 `main` 现在那版的关系（看 PR 先看这节）
 
@@ -876,7 +931,7 @@ os.environ["GCP_PROJECT"] = "test-project-not-a-real-one"
 另外两件顺手发现、需要有人决定的（**我不单方面动别人分支上的东西**）：
 
 - `main` 上提交了 `monitor_server.log`（20487 行）和
-  `computer_use_agent/checkpoints/audit_records.jsonl`（28 条稽核记录）。
+  `cctv_audit/checkpoints/audit_records.jsonl`（28 条稽核记录）。
   这个分支的 `.gitignore` 把 `checkpoints/` 整个挡掉了，理由写在里面：
   **稽核记录和证据帧涉及可识别的人**。`main` 上没有证据帧 JPG，只有记录和日志。
 - 仓库现在是 private，所以上面这条不是外泄，是**要不要留在 git 历史里**的问题。

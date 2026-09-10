@@ -31,9 +31,9 @@ import subprocess
 
 import pytest
 
-from computer_use_agent.capture.ffmpeg_util import extract_frame
-from computer_use_agent.capture.stream_grabber import StreamGrabber
-from computer_use_agent.capture.types import CaptureSource
+from cctv_audit.capture.ffmpeg_util import extract_frame
+from cctv_audit.capture.stream_grabber import StreamGrabber
+from cctv_audit.capture.types import CaptureSource
 
 pytestmark = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,

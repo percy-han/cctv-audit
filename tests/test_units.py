@@ -32,22 +32,22 @@ from pathlib import Path
 
 import pytest
 
-from computer_use_agent.agent import UnreadableTimeSpan, _explain_failure, parse_request
-from computer_use_agent.analyzer.schema import Severity, Status, WindowResult, response_schema
-from computer_use_agent.analyzer.sop import load_rules
-from computer_use_agent.analyzer.video_analyzer import (
+from cctv_audit.agent import UnreadableTimeSpan, _explain_failure, parse_request
+from cctv_audit.analyzer.schema import Severity, Status, WindowResult, response_schema
+from cctv_audit.analyzer.sop import load_rules
+from cctv_audit.analyzer.video_analyzer import (
     VideoAnalyzer,
     build_prompt,
     build_system_instruction,
 )
-from computer_use_agent.capture.screen_recorder import content_box, normalise_crop
-from computer_use_agent.capture.types import Clip
+from cctv_audit.capture.screen_recorder import content_box, normalise_crop
+from cctv_audit.capture.types import Clip
 
 
 # The active standard is chosen by SOP_RULES_PATH, so tests that assert on
 # specific rule ids must name their file rather than take whatever is
 # configured -- otherwise switching standards breaks the suite.
-ANALYZER_DIR = Path(__file__).resolve().parents[1] / "computer_use_agent" / "analyzer"
+ANALYZER_DIR = Path(__file__).resolve().parents[1] / "cctv_audit" / "analyzer"
 CCTV_RULES = ANALYZER_DIR / "sop_rules.yaml"
 SHIPPED_RULE_FILES = sorted(ANALYZER_DIR.glob("sop_rules*.yaml"))
 
@@ -60,8 +60,8 @@ def _confirm_reply(*, capture_mode: str, **preflight) -> str:
     """
     import asyncio as _asyncio
 
-    from computer_use_agent.jobs import Job
-    from computer_use_agent.server import Turn, _do_confirm
+    from cctv_audit.jobs import Job
+    from cctv_audit.server import Turn, _do_confirm
 
     job = Job(
         user_id="u", job_id="j0b", target="t", state="ready",
@@ -135,7 +135,7 @@ class TestClipTimeMapping:
 
 class TestWindowAssemblerMath:
     def _assembler(self, tmp_path, window, overlap, time_scale=1.0, segment=None):
-        from computer_use_agent.capture.window_assembler import WindowAssembler
+        from cctv_audit.capture.window_assembler import WindowAssembler
         return WindowAssembler(
             segment_dir=tmp_path / "seg", out_dir=tmp_path / "out",
             window_seconds=window, overlap_seconds=overlap,
@@ -181,7 +181,7 @@ class TestFirstVerdictLatency:
     footage, and a 10-minute window waited nearly 20 minutes."""
 
     def _seg(self, window, overlap, **kw):
-        from computer_use_agent.capture.screen_recorder import choose_segment_seconds
+        from cctv_audit.capture.screen_recorder import choose_segment_seconds
         return choose_segment_seconds(window, window - overlap, **kw)
 
     def test_the_default_window_buffers_less_than_it_used_to(self):
@@ -242,7 +242,7 @@ class TestRetryClassification:
         {"message": "Computer use is not supported for this model in this region"},
     ])
     def test_transient_failures_are_retried(self, exc_kwargs):
-        from computer_use_agent.gcp import is_transient
+        from cctv_audit.gcp import is_transient
         assert is_transient(self._exc(**exc_kwargs))
 
     @pytest.mark.parametrize("message", [
@@ -255,11 +255,11 @@ class TestRetryClassification:
     def test_permanent_failures_are_not_retried(self, message):
         # Every one of these contains 500, 429 or 503 as a substring and was
         # retried three times by the previous implementation.
-        from computer_use_agent.gcp import is_transient
+        from cctv_audit.gcp import is_transient
         assert not is_transient(self._exc(message))
 
     def test_a_code_of_400_is_not_a_transient_500(self):
-        from computer_use_agent.gcp import is_transient
+        from cctv_audit.gcp import is_transient
         assert not is_transient(self._exc("bad request", code=400))
 
 
@@ -324,14 +324,14 @@ class TestInlineSizeCap:
     """
 
     def test_the_cap_stays_under_the_limit_vertex_actually_enforces(self):
-        from computer_use_agent.analyzer.video_analyzer import _MAX_INLINE_BYTES
+        from cctv_audit.analyzer.video_analyzer import _MAX_INLINE_BYTES
 
         assert _MAX_INLINE_BYTES <= 256_000_000
         # And under the whole-request cap once base64 has had its way with it.
         assert _MAX_INLINE_BYTES * 4 / 3 <= 524_288_000
 
     def test_a_five_minute_window_fits_a_normal_store_camera(self):
-        from computer_use_agent.analyzer.video_analyzer import _MAX_INLINE_BYTES
+        from cctv_audit.analyzer.video_analyzer import _MAX_INLINE_BYTES
 
         # The number that decides whether WINDOW_SECONDS=300 needs a GCS upload
         # path: any source below this bitrate does not.
@@ -341,7 +341,7 @@ class TestInlineSizeCap:
     def test_an_oversized_clip_is_refused_before_the_request_is_built(
         self, monkeypatch, tmp_path
     ):
-        from computer_use_agent.analyzer import video_analyzer as va
+        from cctv_audit.analyzer import video_analyzer as va
 
         # Shrink the cap rather than write 250 MB: the guard is a comparison,
         # and the real number is pinned by the two tests above.
@@ -380,8 +380,8 @@ class TestMediaProcessingSwitch:
     def _capture_call(self, monkeypatch, tmp_path, processing):
         import dataclasses
 
-        from computer_use_agent.analyzer import video_analyzer as va
-        from computer_use_agent.config import config as real_config
+        from cctv_audit.analyzer import video_analyzer as va
+        from cctv_audit.config import config as real_config
 
         clip_path = tmp_path / "w.mp4"
         clip_path.write_bytes(b"\x00" * 64)
@@ -401,7 +401,7 @@ class TestMediaProcessingSwitch:
         return seen["contents"][0]
 
     def test_static_sends_a_frame_ladder_and_no_agentic_flag(self, monkeypatch, tmp_path):
-        from computer_use_agent.config import config
+        from cctv_audit.config import config
 
         part = self._capture_call(monkeypatch, tmp_path, "static")
         # Not a hardcoded number: a developer's .env may set ANALYSIS_FPS.
@@ -419,7 +419,7 @@ class TestMediaProcessingSwitch:
         assert part.video_metadata is None
 
     def test_the_bill_counts_the_frames_the_tool_fetched(self, monkeypatch, tmp_path):
-        from computer_use_agent.analyzer import video_analyzer as va
+        from cctv_audit.analyzer import video_analyzer as va
 
         clip_path = tmp_path / "w.mp4"
         clip_path.write_bytes(b"\x00" * 64)
@@ -454,7 +454,7 @@ class TestMediaProcessingSwitch:
     def test_an_unknown_mode_is_refused_at_startup(self):
         import dataclasses
 
-        from computer_use_agent.config import config as real_config
+        from cctv_audit.config import config as real_config
 
         bad = dataclasses.replace(real_config, media_processing="agentix")
         assert any("MEDIA_PROCESSING" in p for p in bad.validate())
@@ -465,7 +465,7 @@ class TestMediaProcessingSwitch:
         # after it, one at a time, for the whole length of the run.
         import dataclasses
 
-        from computer_use_agent.config import config as real_config
+        from cctv_audit.config import config as real_config
 
         bad = dataclasses.replace(
             real_config, media_processing="agentic",
@@ -481,7 +481,7 @@ class TestMediaProcessingSwitch:
     def test_the_working_pairing_passes_and_so_does_static_on_either_model(self):
         import dataclasses
 
-        from computer_use_agent.config import config as real_config
+        from cctv_audit.config import config as real_config
 
         for processing, model in (
             ("agentic", "gemini-3.8-flash"),
@@ -502,7 +502,7 @@ class TestMediaProcessingSwitch:
         # was actually tried and refused.
         import dataclasses
 
-        from computer_use_agent.config import config as real_config
+        from cctv_audit.config import config as real_config
 
         cfg = dataclasses.replace(
             real_config, media_processing="agentic",
@@ -674,11 +674,11 @@ class TestModelReading:
 
     @staticmethod
     def _reading(**kwargs):
-        from computer_use_agent.intent import _Reading
+        from cctv_audit.intent import _Reading
         return _Reading(**{"understood": True, **kwargs})
 
     def test_a_span_becomes_a_start_and_a_duration(self):
-        from computer_use_agent.intent import _to_intent
+        from cctv_audit.intent import _to_intent
         intent = _to_intent(
             self._reading(target_url="https://example.com/v", start_seconds=60,
                           end_seconds=300, reading="从 01:00 看到 05:00"),
@@ -689,7 +689,7 @@ class TestModelReading:
         assert intent.source == "model"
 
     def test_no_end_means_watch_to_the_end(self):
-        from computer_use_agent.intent import _to_intent
+        from cctv_audit.intent import _to_intent
         intent = _to_intent(
             self._reading(target_url="https://example.com/v", end_seconds=-1),
             "稽核 https://example.com/v")
@@ -698,18 +698,18 @@ class TestModelReading:
     def test_a_url_the_message_does_not_contain_is_not_used(self):
         # A made-up video id navigates somewhere real and audits the wrong
         # shop. The message is the only source for the address.
-        from computer_use_agent.intent import _to_intent
+        from cctv_audit.intent import _to_intent
         intent = _to_intent(
             self._reading(target_url="https://www.bilibili.com/video/BV1invented"),
             "稽核 https://example.com/real 整段")
         assert intent.request.target == "https://example.com/real"
 
     def test_no_url_anywhere_means_no_request(self):
-        from computer_use_agent.intent import _to_intent
+        from cctv_audit.intent import _to_intent
         assert _to_intent(self._reading(), "帮我看看门店视频") is None
 
     def test_an_unsure_reading_stops_the_run(self):
-        from computer_use_agent.intent import UnreadableTimeSpan, _to_intent
+        from cctv_audit.intent import UnreadableTimeSpan, _to_intent
         with pytest.raises(UnreadableTimeSpan, match="总长度"):
             _to_intent(
                 self._reading(understood=False, target_url="https://example.com/v",
@@ -717,7 +717,7 @@ class TestModelReading:
                 "https://example.com/v 看最后五分钟")
 
     def test_a_backwards_span_is_refused_even_if_the_model_is_happy(self):
-        from computer_use_agent.intent import UnreadableTimeSpan, _to_intent
+        from cctv_audit.intent import UnreadableTimeSpan, _to_intent
         with pytest.raises(UnreadableTimeSpan):
             _to_intent(
                 self._reading(target_url="https://example.com/v",
@@ -728,7 +728,7 @@ class TestModelReading:
         # The standing guarantee: chat text decides which video and which
         # slice of it, never what counts as a violation. That is enforced by
         # the shape of the reply, not by asking the model nicely.
-        from computer_use_agent.intent import _SCHEMA
+        from cctv_audit.intent import _SCHEMA
         assert set(_SCHEMA["properties"]) == {
             "understood", "target_url", "start_seconds", "end_seconds",
             "reading", "problem",
@@ -736,7 +736,7 @@ class TestModelReading:
 
     @pytest.mark.asyncio
     async def test_an_unreachable_model_falls_back_to_keywords(self, monkeypatch):
-        from computer_use_agent import intent as intent_mod
+        from cctv_audit import intent as intent_mod
 
         async def boom(_text):
             raise RuntimeError("no credentials")
@@ -749,7 +749,7 @@ class TestModelReading:
 
     @pytest.mark.asyncio
     async def test_a_slow_model_does_not_hang_the_start(self, monkeypatch):
-        from computer_use_agent import intent as intent_mod
+        from cctv_audit import intent as intent_mod
 
         async def slow(_text):
             await asyncio.sleep(5)
@@ -763,7 +763,7 @@ class TestModelReading:
     async def test_a_refusal_is_not_downgraded_into_a_guess(self, monkeypatch):
         # The fallback would read "看最后五分钟" as "duration 5 minutes from
         # the top", which is a different five minutes. A refusal stands.
-        from computer_use_agent import intent as intent_mod
+        from cctv_audit import intent as intent_mod
 
         async def refuse(_text):
             raise intent_mod.UnreadableTimeSpan("不知道视频总长度")
@@ -776,8 +776,8 @@ class TestModelReading:
 class TestStore:
     @pytest.mark.asyncio
     async def test_ids_are_unique_and_continue_across_restarts(self, tmp_path):
-        from computer_use_agent.analyzer.video_analyzer import AnalysisOutcome
-        from computer_use_agent.store import AuditStore
+        from cctv_audit.analyzer.video_analyzer import AnalysisOutcome
+        from cctv_audit.store import AuditStore
 
         records = tmp_path / "records.jsonl"
         store = AuditStore(records_path=records, evidence_dir=tmp_path / "ev")
@@ -798,8 +798,8 @@ class TestStore:
 
     @pytest.mark.asyncio
     async def test_failed_analysis_writes_nothing(self, tmp_path):
-        from computer_use_agent.analyzer.video_analyzer import AnalysisOutcome
-        from computer_use_agent.store import AuditStore
+        from cctv_audit.analyzer.video_analyzer import AnalysisOutcome
+        from cctv_audit.store import AuditStore
 
         records = tmp_path / "records.jsonl"
         store = AuditStore(records_path=records, evidence_dir=tmp_path / "ev")
@@ -829,7 +829,7 @@ class FakePage:
 class TestHumanGate:
     @pytest.mark.asyncio
     async def test_dismissing_the_dashboard_banner_releases_the_gate(self):
-        from computer_use_agent.navigator.base import HumanGate
+        from cctv_audit.navigator.base import HumanGate
 
         polls = iter([(True, "captcha"), (True, "captcha"), (True, None)])
 
@@ -844,7 +844,7 @@ class TestHumanGate:
         # The banner is raised by a fire-and-forget POST. If the gate read the
         # state before that landed, an unarmed "no banner" would look like the
         # operator had already pressed 继续 and the challenge would be skipped.
-        from computer_use_agent.navigator.base import HumanGate, HumanInterventionRequired
+        from cctv_audit.navigator.base import HumanGate, HumanInterventionRequired
 
         async def never_armed():
             return True, None
@@ -855,7 +855,7 @@ class TestHumanGate:
 
     @pytest.mark.asyncio
     async def test_an_unreachable_dashboard_does_not_release_the_gate(self):
-        from computer_use_agent.navigator.base import HumanGate, HumanInterventionRequired
+        from cctv_audit.navigator.base import HumanGate, HumanInterventionRequired
 
         async def unreachable():
             return False, None
@@ -866,7 +866,7 @@ class TestHumanGate:
 
     @pytest.mark.asyncio
     async def test_the_challenge_going_away_releases_the_gate(self):
-        from computer_use_agent.navigator.base import HumanGate
+        from cctv_audit.navigator.base import HumanGate
 
         gate = HumanGate(timeout_seconds=10, poll_interval=0.01, mode="wait")
         await asyncio.wait_for(
@@ -885,7 +885,7 @@ class TestUnattendedGate:
     @pytest.mark.asyncio
     async def test_no_dashboard_fails_immediately_instead_of_waiting(self):
         import time as _time
-        from computer_use_agent.navigator.base import HumanGate, HumanInterventionRequired
+        from cctv_audit.navigator.base import HumanGate, HumanInterventionRequired
 
         gate = HumanGate(timeout_seconds=900, poll_interval=0.01)  # mode defaults to auto
         started = _time.monotonic()
@@ -896,7 +896,7 @@ class TestUnattendedGate:
 
     @pytest.mark.asyncio
     async def test_a_dead_dashboard_is_not_an_operator(self):
-        from computer_use_agent.navigator.base import HumanGate, HumanInterventionRequired
+        from cctv_audit.navigator.base import HumanGate, HumanInterventionRequired
 
         async def unreachable():
             return False, None
@@ -907,7 +907,7 @@ class TestUnattendedGate:
 
     @pytest.mark.asyncio
     async def test_off_refuses_even_with_a_live_dashboard(self):
-        from computer_use_agent.navigator.base import HumanGate, HumanInterventionRequired
+        from cctv_audit.navigator.base import HumanGate, HumanInterventionRequired
 
         async def live():
             return True, "captcha"
@@ -920,7 +920,7 @@ class TestUnattendedGate:
     @pytest.mark.asyncio
     async def test_a_live_dashboard_still_gets_to_answer(self):
         # The fail-fast path must not break the attended workflow it protects.
-        from computer_use_agent.navigator.base import HumanGate
+        from cctv_audit.navigator.base import HumanGate
 
         polls = iter([(True, "captcha"), (True, "captcha"), (True, None)])
 
@@ -932,14 +932,14 @@ class TestUnattendedGate:
         await asyncio.wait_for(gate.wait_for_human(FakePage(), "captcha"), timeout=10)
 
     def test_the_mode_is_validated(self):
-        from computer_use_agent.config import Config
+        from cctv_audit.config import Config
 
         assert any("HUMAN_GATE_MODE" in p for p in Config(human_gate_mode="sometimes").validate())
 
 
 class TestBudget:
     def test_each_limit_stops_the_run(self):
-        from computer_use_agent.pipeline import Budget
+        from cctv_audit.pipeline import Budget
 
         assert Budget(max_wall_clock_seconds=0, max_tokens=None, max_windows=None).reason_to_stop() is None
 
@@ -1072,7 +1072,7 @@ class TestReportTable:
         }
 
     def test_violations_render_as_the_requested_table(self):
-        from computer_use_agent.agent import CctvAuditAgent
+        from cctv_audit.agent import CctvAuditAgent
 
         class Store:
             def violations(self, limit=None):
@@ -1085,7 +1085,7 @@ class TestReportTable:
         assert "致命缺陷" in report and "RED_LINE" not in report
 
     def test_a_pipe_in_the_evidence_cannot_break_the_table(self):
-        from computer_use_agent.agent import CctvAuditAgent
+        from cctv_audit.agent import CctvAuditAgent
 
         record = self._record()
         record["findings"][0]["evidence"] = "左手|右手 均为裸手"
@@ -1099,7 +1099,7 @@ class TestReportTable:
         assert row.count("|") == 6
 
     def test_a_clean_run_says_so(self):
-        from computer_use_agent.agent import CctvAuditAgent
+        from cctv_audit.agent import CctvAuditAgent
 
         class Store:
             def violations(self, limit=None):
@@ -1143,7 +1143,7 @@ class TestContentBox:
 
 class TestFailureMessages:
     def test_a_tag_in_the_message_is_not_eaten_by_the_chat_ui(self):
-        from computer_use_agent.navigator.base import NavigationError
+        from cctv_audit.navigator.base import NavigationError
 
         # The UI renders markdown, so a literal tag used to be parsed away --
         # taking the rest of the sentence with it. The reader saw "中断：No".
@@ -1152,7 +1152,7 @@ class TestFailureMessages:
         assert "&lt;video&gt;" in rendered
 
     def test_playwright_noise_is_demoted_not_shown_first(self):
-        from computer_use_agent.navigator.base import NavigationError
+        from cctv_audit.navigator.base import NavigationError
 
         rendered = _explain_failure(NavigationError(
             "页面已打开但 30 秒内没有出现视频播放器：https://x\n"
@@ -1164,7 +1164,7 @@ class TestFailureMessages:
         assert "locator" in rendered  # kept, but folded away
 
     def test_a_dead_link_says_what_to_do(self):
-        from computer_use_agent.navigator.base import TargetUnavailable
+        from cctv_audit.navigator.base import TargetUnavailable
 
         rendered = _explain_failure(TargetUnavailable("这个链接打不开（HTTP 404）：https://x"))
         assert "HTTP 404" in rendered
@@ -1177,8 +1177,8 @@ class TestFailureMessages:
 class TestDeadTargetsAreNotWorthAnAgentTurn:
     @pytest.mark.asyncio
     async def test_a_404_never_reaches_the_fallback(self):
-        from computer_use_agent.navigator.base import NavigationError, TargetUnavailable
-        from computer_use_agent.navigator.resilient import ResilientNavigator
+        from cctv_audit.navigator.base import NavigationError, TargetUnavailable
+        from cctv_audit.navigator.resilient import ResilientNavigator
 
         class DeadInner:
             name = "dead"
@@ -1201,8 +1201,8 @@ class TestDeadTargetsAreNotWorthAnAgentTurn:
 
     @pytest.mark.asyncio
     async def test_a_broken_selector_still_gets_rescued(self):
-        from computer_use_agent.navigator.base import NavigationError
-        from computer_use_agent.navigator.resilient import ResilientNavigator
+        from cctv_audit.navigator.base import NavigationError
+        from cctv_audit.navigator.resilient import ResilientNavigator
 
         class BrokenInner:
             name = "broken"
@@ -1226,8 +1226,8 @@ class TestDeadTargetsAreNotWorthAnAgentTurn:
         # The overlay that blocks the step is usually the same overlay the
         # detector is looking at. Paging a human to close a box we can close
         # ourselves is the expensive way to solve it.
-        from computer_use_agent.navigator.base import NavigationError
-        from computer_use_agent.navigator.resilient import ResilientNavigator
+        from cctv_audit.navigator.base import NavigationError
+        from cctv_audit.navigator.resilient import ResilientNavigator
 
         class NaggedInner:
             name = "nagged"
@@ -1283,8 +1283,8 @@ class TestTheFallbackIsCheckedNotBelieved:
 
     @pytest.mark.asyncio
     async def test_a_seek_is_checked_against_the_playhead(self):
-        from computer_use_agent.navigator.base import NavigationError
-        from computer_use_agent.navigator.resilient import ResilientNavigator
+        from cctv_audit.navigator.base import NavigationError
+        from cctv_audit.navigator.resilient import ResilientNavigator
 
         class Inner:
             name = "inner"
@@ -1307,8 +1307,8 @@ class TestTheFallbackIsCheckedNotBelieved:
 
     @pytest.mark.asyncio
     async def test_opening_a_page_is_checked_for_a_player(self):
-        from computer_use_agent.navigator.base import NavigationError
-        from computer_use_agent.navigator.resilient import ResilientNavigator
+        from cctv_audit.navigator.base import NavigationError
+        from cctv_audit.navigator.resilient import ResilientNavigator
 
         class Inner:
             name = "inner"
@@ -1333,7 +1333,7 @@ class TestTheFallbackIsCheckedNotBelieved:
     async def test_an_unverifiable_result_is_a_failure_not_a_pass(self):
         # When the self-check itself cannot run, "unknown" must not resolve to
         # "fine" -- that is how a blocked page becomes recorded footage.
-        from computer_use_agent.navigator.generic_agent import ComputerUseFallback
+        from cctv_audit.navigator.generic_agent import ComputerUseFallback
 
         fallback = ComputerUseFallback()
 
@@ -1356,8 +1356,8 @@ class TestAnUnknownPlatformIsReadNotGuessed:
 
     @staticmethod
     def _navigator(gate=None, fallback=None):
-        from computer_use_agent.navigator.base import NavigationError
-        from computer_use_agent.navigator.resilient import ResilientNavigator
+        from cctv_audit.navigator.base import NavigationError
+        from cctv_audit.navigator.resilient import ResilientNavigator
 
         class Inner:
             name = "unknown-vendor"
@@ -1372,8 +1372,8 @@ class TestAnUnknownPlatformIsReadNotGuessed:
 
     @pytest.mark.asyncio
     async def test_an_expired_recording_stops_the_run_instead_of_being_retried(self, monkeypatch):
-        from computer_use_agent.navigator import resilient
-        from computer_use_agent.navigator.base import TargetUnavailable
+        from cctv_audit.navigator import resilient
+        from cctv_audit.navigator.base import TargetUnavailable
 
         async def reads_expired(_page):
             return {"blocker": "unavailable", "description": "页面显示「录像已过期，超出保存期限」"}
@@ -1394,7 +1394,7 @@ class TestAnUnknownPlatformIsReadNotGuessed:
 
     @pytest.mark.asyncio
     async def test_an_unrecognised_slider_pages_a_human(self, monkeypatch):
-        from computer_use_agent.navigator import resilient
+        from cctv_audit.navigator import resilient
 
         async def reads_slider(_page):
             return {"blocker": "challenge", "description": "页面要求「向右滑动完成校验」"}
@@ -1422,7 +1422,7 @@ class TestAnUnknownPlatformIsReadNotGuessed:
     @pytest.mark.asyncio
     async def test_an_unreadable_page_still_falls_through_to_the_agent(self, monkeypatch):
         # Not being able to diagnose must not become its own failure mode.
-        from computer_use_agent.navigator import resilient
+        from cctv_audit.navigator import resilient
 
         async def cannot_tell(_page):
             return None
@@ -1442,7 +1442,7 @@ class TestAnUnknownPlatformIsReadNotGuessed:
 
     @pytest.mark.asyncio
     async def test_a_page_that_cannot_be_screenshotted_returns_no_diagnosis(self):
-        from computer_use_agent.navigator.base import diagnose_block
+        from cctv_audit.navigator.base import diagnose_block
         assert await diagnose_block(FakePage("")) is None
 
     @pytest.mark.asyncio
@@ -1456,8 +1456,8 @@ class TestAnUnknownPlatformIsReadNotGuessed:
         exceeded" and nothing about risk control at all. A worse message than
         none: it points at a screenshot bug that does not exist.
         """
-        from computer_use_agent.navigator import resilient
-        from computer_use_agent.navigator.base import NavigationError
+        from cctv_audit.navigator import resilient
+        from cctv_audit.navigator.base import NavigationError
 
         async def cannot_tell(_page):
             return None
@@ -1481,7 +1481,7 @@ class TestDeadPageClassification:
     """Gone vs blocked. Only one of them is worth telling the user to fix."""
 
     def _nav(self):
-        from computer_use_agent.navigator.bilibili import BilibiliNavigator
+        from cctv_audit.navigator.bilibili import BilibiliNavigator
         return BilibiliNavigator()
 
     class _Response:
@@ -1500,7 +1500,7 @@ class TestDeadPageClassification:
 
     @pytest.mark.asyncio
     async def test_404_is_permanent(self):
-        from computer_use_agent.navigator.base import TargetUnavailable
+        from cctv_audit.navigator.base import TargetUnavailable
 
         with pytest.raises(TargetUnavailable):
             await self._nav()._reject_dead_page(
@@ -1512,7 +1512,7 @@ class TestDeadPageClassification:
         # bilibili answers 412 to a crawler-looking request for a perfectly
         # good video. Reporting that as "the video does not exist" sends
         # someone hunting for a URL bug that is not there.
-        from computer_use_agent.navigator.base import NavigationError, TargetUnavailable
+        from cctv_audit.navigator.base import NavigationError, TargetUnavailable
 
         with pytest.raises(NavigationError) as caught:
             await self._nav()._reject_dead_page(
@@ -1522,7 +1522,7 @@ class TestDeadPageClassification:
 
     @pytest.mark.asyncio
     async def test_a_soft_404_is_read_off_the_page(self):
-        from computer_use_agent.navigator.base import TargetUnavailable
+        from cctv_audit.navigator.base import TargetUnavailable
 
         with pytest.raises(TargetUnavailable) as caught:
             await self._nav()._reject_dead_page(
@@ -1580,7 +1580,7 @@ class TestClosingTheLoginNag:
             return self.hidden if args else None
 
     def _nav(self):
-        from computer_use_agent.navigator.bilibili import BilibiliNavigator
+        from cctv_audit.navigator.bilibili import BilibiliNavigator
         return BilibiliNavigator()
 
     @pytest.mark.asyncio
@@ -1619,7 +1619,7 @@ class TestClosingTheLoginNag:
     async def test_a_player_that_will_not_restart_does_not_break_the_poll(self, monkeypatch):
         # The caller does its remaining housekeeping after this returns, and
         # will come round again in a few seconds anyway.
-        from computer_use_agent.navigator.base import NavigationError
+        from cctv_audit.navigator.base import NavigationError
 
         navigator = self._nav()
 
@@ -1667,7 +1667,7 @@ class TestAPageScriptCannotHangTheRun:
 
     @pytest.mark.asyncio
     async def test_a_script_that_never_returns_becomes_an_ordinary_failure(self):
-        from computer_use_agent.browser_actions import PageScriptTimeout, evaluate_bounded
+        from cctv_audit.browser_actions import PageScriptTimeout, evaluate_bounded
 
         with pytest.raises(PageScriptTimeout) as caught:
             await asyncio.wait_for(
@@ -1684,7 +1684,7 @@ class TestAPageScriptCannotHangTheRun:
         # The bounded wait above is the backstop. This is the actual fix: the
         # promise is fired and dropped, because whether playback started is
         # answered by watching the playhead, not by the promise.
-        from computer_use_agent.navigator.bilibili import BilibiliNavigator
+        from cctv_audit.navigator.bilibili import BilibiliNavigator
 
         scripts = []
 
@@ -1716,7 +1716,7 @@ class TestAPageScriptCannotHangTheRun:
         # all three are a black rectangle. `diagnose_block` would say "nothing
         # is blocking it", which is true and useless. The element's own state
         # is the only place the answer exists.
-        from computer_use_agent.navigator.bilibili import BilibiliNavigator
+        from cctv_audit.navigator.bilibili import BilibiliNavigator
 
         class _Page:
             async def evaluate(self, _script, *_args):
@@ -1733,10 +1733,10 @@ class TestAPageScriptCannotHangTheRun:
         # hangs -- a wall clock around the whole opening sequence.
         import dataclasses
 
-        from computer_use_agent import pipeline as pipeline_mod
-        from computer_use_agent.config import config
-        from computer_use_agent.intent import AuditRequest
-        from computer_use_agent.pipeline import AuditPipeline
+        from cctv_audit import pipeline as pipeline_mod
+        from cctv_audit.config import config
+        from cctv_audit.intent import AuditRequest
+        from cctv_audit.pipeline import AuditPipeline
 
         monkeypatch.setattr(
             pipeline_mod, "config",
@@ -1776,7 +1776,7 @@ class TestAPageScriptCannotHangTheRun:
         # forever with no request left for anyone to notice dying.
         import inspect
 
-        from computer_use_agent.pipeline import AuditPipeline
+        from cctv_audit.pipeline import AuditPipeline
 
         source = inspect.getsource(AuditPipeline._browser_session)
         assert "navigation_budget_seconds" in source, (
@@ -1808,13 +1808,13 @@ class TestChallengeDetection:
     async def test_a_collapsed_login_widget_is_not_a_challenge(self):
         # bilibili ships .captcha-img__img and friends in its login panel at
         # all times. Blocking on those halts every run that sees a login nag.
-        from computer_use_agent.navigator.base import detect_challenge
+        from cctv_audit.navigator.base import detect_challenge
 
         assert await detect_challenge(self._Page(widget=None)) is None
 
     @pytest.mark.asyncio
     async def test_a_real_widget_still_fires(self):
-        from computer_use_agent.navigator.base import detect_challenge
+        from cctv_audit.navigator.base import detect_challenge
 
         page = self._Page(widget={"selector": ".geetest_panel", "width": 300, "height": 200})
         reason = await detect_challenge(page)
@@ -1824,14 +1824,14 @@ class TestChallengeDetection:
     async def test_an_ordinary_sms_form_label_is_not_a_challenge(self):
         # "验证码" is the label next to every SMS login input in China. The old
         # hint list treated it as proof of a CAPTCHA.
-        from computer_use_agent.navigator.base import detect_challenge
+        from cctv_audit.navigator.base import detect_challenge
 
         assert await detect_challenge(
             self._Page(text="短信验证码\n请输入手机号\n登录")) is None
 
     @pytest.mark.asyncio
     async def test_an_explicit_instruction_is_a_challenge(self):
-        from computer_use_agent.navigator.base import detect_challenge
+        from cctv_audit.navigator.base import detect_challenge
 
         reason = await detect_challenge(self._Page(text="请完成安全验证后继续"))
         assert reason and "请完成安全验证" in reason
@@ -1840,7 +1840,7 @@ class TestChallengeDetection:
         # The vendor selectors are unambiguous, so they may be small and stand
         # alone. The catch-all may not: it matches the picture-captcha slot in
         # every Chinese login form.
-        from computer_use_agent.navigator.base import _AMBIGUOUS_WIDGETS, _CHALLENGE_WIDGETS
+        from cctv_audit.navigator.base import _AMBIGUOUS_WIDGETS, _CHALLENGE_WIDGETS
 
         conclusive = dict((sel, (w, h)) for sel, w, h in _CHALLENGE_WIDGETS)
         assert "[class*='captcha' i]" not in conclusive
@@ -1854,7 +1854,7 @@ class TestChallengeDetection:
         # `captcha`-classed slot. That is a login nag -- keep_clear dismisses it
         # and playback resumes -- but it used to page a human on every run
         # longer than a minute, on a platform where no human can answer.
-        from computer_use_agent.navigator.base import detect_challenge
+        from cctv_audit.navigator.base import detect_challenge
 
         page = self._Page(
             widget={"selector": "[class*='captcha' i]", "width": 559, "height": 284},
@@ -1864,7 +1864,7 @@ class TestChallengeDetection:
 
     @pytest.mark.asyncio
     async def test_the_same_widget_counts_once_the_page_says_so(self):
-        from computer_use_agent.navigator.base import detect_challenge
+        from cctv_audit.navigator.base import detect_challenge
 
         page = self._Page(
             widget={"selector": "[class*='captcha' i]", "width": 559, "height": 284},
@@ -1875,7 +1875,7 @@ class TestChallengeDetection:
 
     @pytest.mark.asyncio
     async def test_a_scan_failure_does_not_invent_a_challenge(self):
-        from computer_use_agent.navigator.base import detect_challenge
+        from cctv_audit.navigator.base import detect_challenge
 
         class Broken:
             async def evaluate(self, script, arg=None):
@@ -1894,7 +1894,7 @@ class TestReportIsAboutThisRunOnly:
 
     @staticmethod
     def _outcome(index, status):
-        from computer_use_agent.analyzer.video_analyzer import AnalysisOutcome
+        from cctv_audit.analyzer.video_analyzer import AnalysisOutcome
 
         result = WindowResult.model_validate({
             "scene_summary": "s",
@@ -1907,7 +1907,7 @@ class TestReportIsAboutThisRunOnly:
 
     @pytest.mark.asyncio
     async def test_an_earlier_runs_findings_stay_out_of_the_table(self, tmp_path):
-        from computer_use_agent.store import AuditStore
+        from cctv_audit.store import AuditStore
 
         records = tmp_path / "records.jsonl"
         records.write_text(json.dumps({
@@ -1928,7 +1928,7 @@ class TestReportIsAboutThisRunOnly:
 
     @pytest.mark.asyncio
     async def test_covered_span_reports_what_was_actually_watched(self, tmp_path):
-        from computer_use_agent.store import AuditStore
+        from cctv_audit.store import AuditStore
 
         store = AuditStore(records_path=tmp_path / "r.jsonl", evidence_dir=tmp_path / "ev")
         assert store.covered_span() is None
@@ -1952,7 +1952,7 @@ class TestZeroViolationsHasTwoOppositeCauses:
 
     @staticmethod
     def _outcome(index, statuses, *, visible=True):
-        from computer_use_agent.analyzer.video_analyzer import AnalysisOutcome
+        from cctv_audit.analyzer.video_analyzer import AnalysisOutcome
 
         result = WindowResult.model_validate({
             "scene_summary": "s",
@@ -1966,7 +1966,7 @@ class TestZeroViolationsHasTwoOppositeCauses:
         return AnalysisOutcome(clip=make_clip(index=index), result=result)
 
     async def _summary(self, tmp_path, statuses, *, visible=True):
-        from computer_use_agent.store import AuditStore
+        from cctv_audit.store import AuditStore
 
         store = AuditStore(records_path=tmp_path / "r.jsonl", evidence_dir=tmp_path / "ev")
         await store.record(self._outcome(0, statuses, visible=visible))
@@ -1991,7 +1991,7 @@ class TestZeroViolationsHasTwoOppositeCauses:
 
     @pytest.mark.asyncio
     async def test_the_report_refuses_to_pass_footage_it_could_not_read(self, tmp_path):
-        from computer_use_agent.agent import CctvAuditAgent
+        from cctv_audit.agent import CctvAuditAgent
 
         summary, store = await self._summary(
             tmp_path, ["CANNOT_DETERMINE"] * 5, visible=False)
@@ -2008,7 +2008,7 @@ class TestZeroViolationsHasTwoOppositeCauses:
 
     @pytest.mark.asyncio
     async def test_a_partly_readable_run_says_how_much_was_missed(self, tmp_path):
-        from computer_use_agent.agent import CctvAuditAgent
+        from cctv_audit.agent import CctvAuditAgent
 
         summary, store = await self._summary(
             tmp_path, ["COMPLIANT", "COMPLIANT", "CANNOT_DETERMINE"])
@@ -2026,7 +2026,7 @@ class TestZeroViolationsHasTwoOppositeCauses:
 
     @pytest.mark.asyncio
     async def test_a_genuinely_clean_run_still_gets_its_tick(self, tmp_path):
-        from computer_use_agent.agent import CctvAuditAgent
+        from cctv_audit.agent import CctvAuditAgent
 
         summary, store = await self._summary(tmp_path, ["COMPLIANT"] * 4)
         summary.update({
@@ -2057,7 +2057,7 @@ class TestCoverageHonesty:
     def _coverage(
         self, span, *, start=120.0, duration=600.0, stop_kind=None, ends_at=None, source=None
     ):
-        from computer_use_agent.pipeline import AuditPipeline, AuditRequest
+        from cctv_audit.pipeline import AuditPipeline, AuditRequest
 
         request = AuditRequest(target="x", start_seconds=start, duration_seconds=duration)
         return AuditPipeline._coverage(
@@ -2066,7 +2066,7 @@ class TestCoverageHonesty:
     def test_a_video_shorter_than_the_request_is_not_an_early_stop(self):
         # Asking for ten minutes from 14:40 of a 15:15 video is the caller's
         # arithmetic, not a pipeline failure -- but coverage is still short.
-        from computer_use_agent.agent import CctvAuditAgent
+        from cctv_audit.agent import CctvAuditAgent
 
         out = self._coverage(
             (892.7, 907.7), start=880.0, stop_kind="video_ended", ends_at=915.2)
@@ -2110,7 +2110,7 @@ class TestCoverageHonesty:
         assert out["complete"] is True and out["incomplete_reason"] is None
 
     def test_the_report_leads_with_the_shortfall(self):
-        from computer_use_agent.agent import CctvAuditAgent
+        from cctv_audit.agent import CctvAuditAgent
 
         summary = {
             "windows_analyzed": 5, "windows_failed": 0, "violations": 5,
@@ -2145,7 +2145,7 @@ class TestStallRecovery:
     class _Runner:
         """Only the parts of AuditPipeline that the watchdog touches."""
 
-        from computer_use_agent.pipeline import AuditPipeline as _P
+        from cctv_audit.pipeline import AuditPipeline as _P
         stop = _P.stop
         _watch_page = _P._watch_page
         # The real one: the watchdog calls it every poll, and a stub that
@@ -2198,7 +2198,7 @@ class TestStallRecovery:
     async def _run(self, navigator, monkeypatch, *, page_is_source=True):
         import types as _types
 
-        from computer_use_agent import pipeline as pipeline_module
+        from cctv_audit import pipeline as pipeline_module
 
         # Config is frozen, and the poll interval is the only thing standing
         # between this test and half a minute of real sleeping.
@@ -2381,7 +2381,7 @@ class TestWatchdogOutlivesCapture:
     async def _drain(self, navigator, monkeypatch, *, page_is_source, polls=60):
         import types as _types
 
-        from computer_use_agent import pipeline as pipeline_module
+        from cctv_audit import pipeline as pipeline_module
 
         monkeypatch.setattr(pipeline_module, "config", _types.SimpleNamespace(
             page_watch_seconds=0.001, stop_on_video_end=True,
@@ -2439,7 +2439,7 @@ class TestRepaintDetectorReachesTheDashboard:
     """
 
     def _runner(self):
-        from computer_use_agent.pipeline import AuditPipeline
+        from cctv_audit.pipeline import AuditPipeline
 
         runner = TestStallRecovery._Runner()
         runner._repaint_stalled = False
@@ -2486,7 +2486,7 @@ class TestCpuProbe:
     """Attribution, not arithmetic: the line has to name the culprit."""
 
     def test_the_ceiling_is_the_cgroup_allowance_not_the_host(self, tmp_path, monkeypatch):
-        from computer_use_agent import cpuprobe
+        from cctv_audit import cpuprobe
 
         # A four-core allowance carved out of a sixteen-core host. Reading the
         # host would make every later percentage look four times healthier.
@@ -2498,13 +2498,13 @@ class TestCpuProbe:
         assert cpuprobe.cpu_quota() == 4.0
 
     def test_an_unlimited_cgroup_falls_back_to_the_core_count(self):
-        from computer_use_agent.cpuprobe import _parse_cpu_max
+        from cctv_audit.cpuprobe import _parse_cpu_max
 
         assert _parse_cpu_max("max 100000") is None
         assert _parse_cpu_max("nonsense") is None
 
     def test_chromiums_many_processes_are_counted_as_one_name(self, monkeypatch):
-        from computer_use_agent import cpuprobe
+        from cctv_audit import cpuprobe
 
         # A dozen renderers at 25% each outweigh one ffmpeg at 90%, and
         # reporting the busiest single pid would say the opposite.
@@ -2520,7 +2520,7 @@ class TestCpuProbe:
         assert line.index("chrome") < line.index("ffmpeg")
 
     def test_a_process_that_started_mid_window_counts_all_of_its_time(self, monkeypatch):
-        from computer_use_agent import cpuprobe
+        from cctv_audit import cpuprobe
 
         # Clip ffmpegs are born and die inside a fifteen-second window. Charging
         # them only the part after a snapshot they never appeared in would hide
@@ -2530,7 +2530,7 @@ class TestCpuProbe:
         assert "ffmpeg 40%" in probe.report(10.0)
 
     def test_the_line_says_how_much_of_the_allowance_is_gone(self, monkeypatch):
-        from computer_use_agent import cpuprobe
+        from cctv_audit import cpuprobe
 
         probe = _probe_over(cpuprobe, monkeypatch, {}, {7: ("python", 30.0)})
         probe.quota = 4.0
@@ -2544,7 +2544,7 @@ class TestSchedulingProbe:
     """Telling 'nobody scheduled us' apart from 'we blocked our own loop'."""
 
     def test_a_missing_schedstat_is_said_so_not_reported_as_zero(self, monkeypatch):
-        from computer_use_agent import cpuprobe
+        from cctv_audit import cpuprobe
 
         # A fabricated 0ms reads as "definitely not throttled", which is the
         # one conclusion this probe exists to stop being drawn by accident.
@@ -2557,7 +2557,7 @@ class TestSchedulingProbe:
         probe.stop()
 
     def test_time_spent_waiting_for_a_cpu_is_reported_as_a_share(self, monkeypatch):
-        from computer_use_agent import cpuprobe
+        from cctv_audit import cpuprobe
 
         waits = iter([1.0, 4.0])
         monkeypatch.setattr(cpuprobe, "runqueue_wait_seconds", lambda: next(waits))
@@ -2568,7 +2568,7 @@ class TestSchedulingProbe:
         probe.stop()
 
     def test_the_thread_tick_keeps_time_when_nothing_is_in_the_way(self):
-        from computer_use_agent.cpuprobe import ThreadTicker
+        from cctv_audit.cpuprobe import ThreadTicker
 
         ticker = ThreadTicker(0.01)
         ticker.start()
@@ -2582,7 +2582,7 @@ class TestSchedulingProbe:
         assert max(ticks) < 200
 
     def test_draining_the_ticker_twice_does_not_double_count(self):
-        from computer_use_agent.cpuprobe import ThreadTicker
+        from cctv_audit.cpuprobe import ThreadTicker
 
         ticker = ThreadTicker(0.01)
         ticker.start()
@@ -2606,7 +2606,7 @@ class TestPreviewChannel:
     """The dashboard feed must never be able to degrade the evidence feed."""
 
     def test_preview_defaults_are_cheaper_than_the_evidence_feed(self):
-        from computer_use_agent.config import config
+        from cctv_audit.config import config
 
         # Measured on a 1080p video page: a full-size q85 frame is ~280 KB of
         # base64, a 960x540 q60 frame ~58 KB. The point of the second stream is
@@ -2625,7 +2625,7 @@ class TestPreviewChannel:
         # of the two capture strategies.
         import inspect
 
-        from computer_use_agent.capture.screen_recorder import ScreenRecorder
+        from cctv_audit.capture.screen_recorder import ScreenRecorder
 
         params = inspect.signature(ScreenRecorder.__init__).parameters
         assert not [p for p in params if "preview" in p], \
@@ -2633,7 +2633,7 @@ class TestPreviewChannel:
 
     @pytest.mark.asyncio
     async def test_the_preview_forwards_the_latest_frame_and_drops_the_rest(self):
-        from computer_use_agent.capture.preview import LivePreview
+        from cctv_audit.capture.preview import LivePreview
 
         sent: list[str] = []
         page = self._FakePage()
@@ -2662,7 +2662,7 @@ class TestPreviewChannel:
         # does not (job 692b53: `screencast in` 0.0 fps for two minutes).
         import logging
 
-        from computer_use_agent.capture.preview import LivePreview
+        from cctv_audit.capture.preview import LivePreview
 
         live = LivePreview(page=None, on_frame=lambda _: None)
         live._forwarding = True
@@ -2680,7 +2680,7 @@ class TestPreviewChannel:
     def test_a_cast_still_producing_says_nothing(self, caplog):
         import logging
 
-        from computer_use_agent.capture.preview import LivePreview
+        from cctv_audit.capture.preview import LivePreview
 
         live = LivePreview(page=None, on_frame=lambda _: None)
         live._forwarding = True
@@ -2699,7 +2699,7 @@ class TestPreviewChannel:
     async def test_closing_a_preview_that_never_started_is_safe(self):
         # The pipeline's shutdown path runs whether or not navigation got
         # far enough to open anything.
-        from computer_use_agent.capture.preview import LivePreview
+        from cctv_audit.capture.preview import LivePreview
 
         await LivePreview(page=None, on_frame=lambda _: None).aclose()
 
@@ -2717,7 +2717,7 @@ class TestPreviewChannel:
         "how many polls have happened by now" makes the test measure the sleep
         schedule instead of the behaviour.
         """
-        from computer_use_agent.capture import preview as preview_mod
+        from cctv_audit.capture import preview as preview_mod
 
         # 5s between checks is right in production and unusable in a test.
         monkeypatch.setattr(preview_mod, "_VIEWER_POLL_SECONDS", 0.0)
@@ -2834,7 +2834,7 @@ class TestPreviewChannel:
         0.6-3.2 fps against a configured 12 -- with nothing dropped by the
         in-flight cap and 140ms posts. It was only ever waiting.
         """
-        from computer_use_agent.capture import preview as preview_mod
+        from cctv_audit.capture import preview as preview_mod
 
         monkeypatch.setattr(preview_mod, "_VIEWER_POLL_SECONDS", 0.0)
 
@@ -2865,7 +2865,7 @@ class TestPreviewChannel:
         # is indistinguishable from "nobody is there". In the cloud that
         # happened constantly: the container logged paused/resumed about twice
         # a second with a viewer connected the whole time.
-        from computer_use_agent.capture import preview as preview_mod
+        from cctv_audit.capture import preview as preview_mod
 
         monkeypatch.setattr(preview_mod, "_VIEWER_POLL_SECONDS", 0.0)
         answers = [True, True, RuntimeError("timed out"), True, True]
@@ -2894,7 +2894,7 @@ class TestPreviewChannel:
     async def test_two_misses_in_a_row_still_stop_the_stream(self, monkeypatch):
         # The other half: a dashboard that is genuinely gone must not keep
         # being sent a live CCTV feed for the rest of the audit.
-        from computer_use_agent.capture import preview as preview_mod
+        from cctv_audit.capture import preview as preview_mod
 
         monkeypatch.setattr(preview_mod, "_VIEWER_POLL_SECONDS", 0.0)
         state = {"up": True}
@@ -2949,7 +2949,7 @@ class TestPreviewChannel:
             self.context = _Context()
 
     def test_a_slow_link_drops_frames_instead_of_queueing_them(self):
-        from computer_use_agent.monitor import (
+        from cctv_audit.monitor import (
             _MAX_FRAMES_IN_FLIGHT, BrowserMonitorClient)
 
         client = BrowserMonitorClient()
@@ -2973,14 +2973,14 @@ class TestPreviewChannel:
         # measured cloud run delivered 0.5 fps while PREVIEW_FPS said 12, and
         # nothing reported it because dropping frames is by design. Pinning
         # this so the constant cannot quietly go back to 1.
-        from computer_use_agent.monitor import _MAX_FRAMES_IN_FLIGHT
+        from cctv_audit.monitor import _MAX_FRAMES_IN_FLIGHT
 
         assert _MAX_FRAMES_IN_FLIGHT > 1
 
     def test_a_failed_send_does_not_wedge_the_channel_shut(self):
         # The in-flight count is only safe if it is always released. A send that
         # cannot even be scheduled must not stop the preview forever.
-        from computer_use_agent.monitor import BrowserMonitorClient
+        from cctv_audit.monitor import BrowserMonitorClient
 
         client = BrowserMonitorClient()
         client.update_frame_b64("a")  # no running loop -> _fire_and_forget bails
@@ -2993,7 +2993,7 @@ class TestPreviewChannel:
         # stray extra release is reachable. A counter allowed below zero would
         # turn the cap into an unbounded queue -- the exact pile-up it exists
         # to prevent.
-        from computer_use_agent.monitor import (
+        from cctv_audit.monitor import (
             _MAX_FRAMES_IN_FLIGHT, BrowserMonitorClient)
 
         client = BrowserMonitorClient()
@@ -3014,7 +3014,7 @@ class TestPreviewChannel:
         # read in tests. Without this line the next investigation guesses too.
         import logging
 
-        from computer_use_agent.monitor import (
+        from cctv_audit.monitor import (
             _MAX_FRAMES_IN_FLIGHT, BrowserMonitorClient)
 
         client = BrowserMonitorClient(job_id="d7680d")
@@ -3042,7 +3042,7 @@ class TestPreviewChannel:
         # bill and a reason nobody reads the log.
         import logging
 
-        from computer_use_agent.monitor import BrowserMonitorClient
+        from cctv_audit.monitor import BrowserMonitorClient
 
         client = BrowserMonitorClient()
         client._fire_and_forget = lambda payload, on_done=None: None
@@ -3062,7 +3062,7 @@ class TestWhichProjectWeAreIn:
 
     @staticmethod
     def _project(monkeypatch, **env):
-        from computer_use_agent.config import Config
+        from cctv_audit.config import Config
 
         for name in ("GCP_PROJECT", "GOOGLE_CLOUD_PROJECT"):
             monkeypatch.delenv(name, raising=False)
@@ -3094,7 +3094,7 @@ class TestWhichProjectWeAreIn:
         away instead of at startup. Read conftest for why the suite needs the
         variable at all; this is the coverage that move would otherwise cost.
         """
-        from computer_use_agent.config import Config
+        from cctv_audit.config import Config
 
         problems = Config(gcp_project="").validate()
         assert any("GOOGLE_CLOUD_PROJECT" in p for p in problems)
@@ -3128,7 +3128,7 @@ class TestNotBillingSomeoneElsesProject:
         monkeypatch.setattr(google.auth, "default", fake_default)
 
     def test_the_quota_project_is_taken_off(self, monkeypatch):
-        from computer_use_agent.gcp import credentials_without_quota_project
+        from cctv_audit.gcp import credentials_without_quota_project
 
         self._patch_adc(monkeypatch, self._Creds("596821501265"))
         assert credentials_without_quota_project().quota_project_id is None
@@ -3136,7 +3136,7 @@ class TestNotBillingSomeoneElsesProject:
     def test_credentials_that_cannot_carry_one_are_passed_through(self, monkeypatch):
         # Some credential types have no `with_quota_project`. They also never
         # send the header, so there is nothing to strip.
-        from computer_use_agent.gcp import credentials_without_quota_project
+        from cctv_audit.gcp import credentials_without_quota_project
 
         class Plain:
             pass
@@ -3149,7 +3149,7 @@ class TestNotBillingSomeoneElsesProject:
         # Locally, and in this suite, there may be no ADC. Returning None lets
         # the client fall back to its own default and fail with its own message
         # instead of this helper's.
-        from computer_use_agent.gcp import credentials_without_quota_project
+        from cctv_audit.gcp import credentials_without_quota_project
 
         self._patch_adc(monkeypatch, RuntimeError("could not automatically determine"))
         assert credentials_without_quota_project() is None
@@ -3166,7 +3166,7 @@ class TestTheSopErrorSaysWhatIsWrong:
         import asyncio
         import types
 
-        from computer_use_agent.analyzer import sop as sop_mod
+        from cctv_audit.analyzer import sop as sop_mod
 
         real = (
             "403 GET https://storage.googleapis.com/download/storage/v1/b/"
@@ -3193,7 +3193,7 @@ class TestTheSopErrorSaysWhatIsWrong:
         import asyncio
         import types
 
-        from computer_use_agent.analyzer import sop as sop_mod
+        from cctv_audit.analyzer import sop as sop_mod
 
         monkeypatch.setattr(sop_mod, "config", types.SimpleNamespace(
             sop_bucket="b", sop_prefix="", gcp_project="p"))
@@ -3217,7 +3217,7 @@ class TestOnlyNamedOriginsSeeOurIdentity:
 
     @staticmethod
     def _origins(monkeypatch, raw):
-        from computer_use_agent.config import Config
+        from cctv_audit.config import Config
 
         monkeypatch.setenv("OIDC_ORIGINS", raw)
         return Config().oidc_origins
@@ -3240,7 +3240,7 @@ class TestOnlyNamedOriginsSeeOurIdentity:
         # The default, and the only configuration that has run against
         # bilibili. Empty here is what makes every other site token-free.
         monkeypatch.delenv("OIDC_ORIGINS", raising=False)
-        from computer_use_agent.config import Config
+        from cctv_audit.config import Config
 
         assert Config().oidc_origins == ()
         assert self._origins(monkeypatch, "  ,  ") == ()
@@ -3249,7 +3249,7 @@ class TestOnlyNamedOriginsSeeOurIdentity:
     def _patch_minting(monkeypatch, origins, *, record=None):
         import types
 
-        from computer_use_agent import gcp as gcp_mod
+        from cctv_audit import gcp as gcp_mod
         from google.oauth2 import id_token as google_id_token
 
         gcp_mod.reset_id_token_cache()
@@ -3266,7 +3266,7 @@ class TestOnlyNamedOriginsSeeOurIdentity:
         return calls
 
     def test_a_listed_origin_gets_a_token_audienced_at_itself(self, monkeypatch):
-        from computer_use_agent.gcp import id_token_for
+        from cctv_audit.gcp import id_token_for
 
         calls = self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
         assert id_token_for("https://demo.a.run.app/hls/index.m3u8") == \
@@ -3277,7 +3277,7 @@ class TestOnlyNamedOriginsSeeOurIdentity:
         assert calls == ["https://demo.a.run.app"]
 
     def test_everywhere_else_gets_nothing_and_mints_nothing(self, monkeypatch):
-        from computer_use_agent.gcp import id_token_for
+        from cctv_audit.gcp import id_token_for
 
         calls = self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
         for url in (
@@ -3293,7 +3293,7 @@ class TestOnlyNamedOriginsSeeOurIdentity:
         assert calls == []
 
     def test_the_token_is_minted_once_and_reused(self, monkeypatch):
-        from computer_use_agent.gcp import id_token_for
+        from cctv_audit.gcp import id_token_for
 
         calls = self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
         for _ in range(50):  # roughly one HLS segment each
@@ -3301,7 +3301,7 @@ class TestOnlyNamedOriginsSeeOurIdentity:
         assert calls == ["https://demo.a.run.app"]
 
     def test_a_stale_token_is_replaced(self, monkeypatch):
-        from computer_use_agent.gcp import id_token_for
+        from cctv_audit.gcp import id_token_for
 
         calls = self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
         url = "https://demo.a.run.app/store.mp4"
@@ -3316,7 +3316,7 @@ class TestOnlyNamedOriginsSeeOurIdentity:
         # token in the shared header block would hand it to whichever CDN the
         # player pulls from, and the audit would succeed either way, so nothing
         # would ever surface it.
-        from computer_use_agent.capture.probe import StreamProbe
+        from cctv_audit.capture.probe import StreamProbe
 
         self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
         base = {"Referer": "https://demo.a.run.app/hls.html", "Cookie": "a=b"}
@@ -3334,7 +3334,7 @@ class TestOnlyNamedOriginsSeeOurIdentity:
         import asyncio
         import types
 
-        from computer_use_agent import pipeline as pipeline_mod
+        from cctv_audit import pipeline as pipeline_mod
 
         self._patch_minting(monkeypatch, ["https://demo.a.run.app"])
         monkeypatch.setattr(pipeline_mod, "config", types.SimpleNamespace(
@@ -3381,7 +3381,7 @@ class TestOnlyNamedOriginsSeeOurIdentity:
         import asyncio
         import types
 
-        from computer_use_agent import pipeline as pipeline_mod
+        from cctv_audit import pipeline as pipeline_mod
 
         monkeypatch.setattr(pipeline_mod, "config",
                             types.SimpleNamespace(oidc_origins=()))
@@ -3402,8 +3402,8 @@ class TestTalkingToARemoteDashboard:
     @staticmethod
     def _client(monkeypatch, *, url="", token="s3cret"):
         import types
-        from computer_use_agent import config as config_mod
-        from computer_use_agent.monitor import BrowserMonitorClient
+        from cctv_audit import config as config_mod
+        from cctv_audit.monitor import BrowserMonitorClient
 
         monkeypatch.setattr(config_mod, "config", types.SimpleNamespace(
             monitor_port=8080, monitor_token=token, monitor_url=url,
@@ -3528,7 +3528,7 @@ class TestTalkingToARemoteDashboard:
     async def test_a_job_scoped_client_only_counts_its_own_viewers(self, monkeypatch):
         # Otherwise a colleague watching a different audit keeps this one
         # streaming frames at nobody.
-        from computer_use_agent.monitor import monitor_for_job
+        from cctv_audit.monitor import monitor_for_job
 
         client = self._client(monkeypatch)
         scoped = monitor_for_job("abc123")
@@ -3547,7 +3547,7 @@ class TestTalkingToARemoteDashboard:
         # Stamped centrally, because one event type missed would show up as a
         # card on somebody else's dashboard -- a symptom nobody would trace
         # back to a missing field.
-        from computer_use_agent.monitor import monitor_for_job
+        from cctv_audit.monitor import monitor_for_job
 
         scoped = monitor_for_job("abc123")
         posted = []
@@ -3600,7 +3600,7 @@ class TestPlayerGeometryIsHeld:
     framing the page header and half the picture."""
 
     class _Runner:
-        from computer_use_agent.pipeline import AuditPipeline as _P
+        from cctv_audit.pipeline import AuditPipeline as _P
         _hold_geometry = _P._hold_geometry
         del _P
 
@@ -3636,7 +3636,7 @@ class TestPlayerGeometryIsHeld:
     def _cfg(self, monkeypatch):
         import types as _types
 
-        from computer_use_agent import pipeline as pipeline_module
+        from cctv_audit import pipeline as pipeline_module
 
         monkeypatch.setattr(pipeline_module, "config",
                             _types.SimpleNamespace(fullscreen_player=True))
@@ -3698,7 +3698,7 @@ class TestPlayerGeometryIsHeld:
         # fullscreen, and every evidence frame after that was the whole
         # bilibili page: sidebar, recommendations, comments, with the footage
         # in one corner. Confirmed against saved evidence frames.
-        from computer_use_agent.capture.screen_recorder import content_box
+        from cctv_audit.capture.screen_recorder import content_box
         full_frame = {"x": 0, "y": 0, "width": 1920, "height": 1080,
                       "intrinsic_width": 1920, "intrinsic_height": 1080}
         assert content_box(full_frame) is None, "no bars to cut"
@@ -3757,7 +3757,7 @@ class TestPlanAIsNotLeftOnTheTable:
             pass
 
     def _probe(self, monkeypatch, *, playlists=(), streams=(), segments=(), answers=None):
-        from computer_use_agent.capture import probe as probe_mod
+        from cctv_audit.capture import probe as probe_mod
 
         async def fake_probe_stream(url, headers=None, timeout=15.0):
             return (answers or {}).get(url)
@@ -3882,7 +3882,7 @@ class TestTheReportReadsAsATimeline:
                 "timestamp_exact": True, "evidence_frame": "e.jpg"}
 
     def _store(self, records):
-        from computer_use_agent.store import AuditStore
+        from cctv_audit.store import AuditStore
 
         store = AuditStore.__new__(AuditStore)
         store._run_records = records
@@ -3898,7 +3898,7 @@ class TestTheReportReadsAsATimeline:
         assert [r["window_index"] for r in store.violations()] == [0, 1, 2]
 
     def test_findings_inside_one_window_are_ordered_too(self):
-        from computer_use_agent.agent import CctvAuditAgent
+        from cctv_audit.agent import CctvAuditAgent
 
         store = self._store([
             self._record(0, 60, [self._finding(71, "B"), self._finding(62, "A")]),
@@ -3908,7 +3908,7 @@ class TestTheReportReadsAsATimeline:
 
     def test_a_truncated_table_says_it_is_truncated(self):
         # Keeping the earliest 50 silently reads as "these are all of them".
-        from computer_use_agent.agent import CctvAuditAgent, _MAX_TABLE_ROWS
+        from cctv_audit.agent import CctvAuditAgent, _MAX_TABLE_ROWS
 
         store = self._store([
             self._record(i, i * 15, [self._finding(i * 15 + 3)])
@@ -3922,7 +3922,7 @@ class TestTheReportReadsAsATimeline:
         assert "12:30 - 12:45" not in report
 
     def test_a_complete_table_says_nothing_about_truncation(self):
-        from computer_use_agent.agent import CctvAuditAgent
+        from cctv_audit.agent import CctvAuditAgent
 
         store = self._store([self._record(0, 60, [self._finding(62)])])
         assert "个窗口有违规" not in CctvAuditAgent._report(self._summary(), store)
@@ -3930,7 +3930,7 @@ class TestTheReportReadsAsATimeline:
     def test_the_dashboard_slots_a_late_window_into_place(self):
         # A slow window must not land at the bottom of the sidebar minutes
         # after the windows that follow it.
-        from computer_use_agent.monitor_server import _segment_order
+        from cctv_audit.monitor_server import _segment_order
 
         arrived = [
             {"id": 2, "start_seconds": 72.0},
@@ -3942,7 +3942,7 @@ class TestTheReportReadsAsATimeline:
     def test_records_from_an_older_jsonl_keep_their_insertion_order(self):
         # `start_seconds` postdates some records on disk. Missing must not mean
         # "time zero", or replayed history piles up above the live run.
-        from computer_use_agent.monitor_server import _segment_order
+        from cctv_audit.monitor_server import _segment_order
 
         old = [{"id": 3}, {"id": 1}, {"id": 2}]
         assert [s["id"] for s in sorted(old, key=_segment_order)] == [1, 2, 3]
@@ -3972,7 +3972,7 @@ class TestDashboardRooms:
 
     @pytest.fixture(autouse=True)
     def _fresh_rooms(self):
-        from computer_use_agent import monitor_server as ms
+        from cctv_audit import monitor_server as ms
 
         ms._rooms.clear()
         ms._rooms[""] = ms.Room("")
@@ -3983,7 +3983,7 @@ class TestDashboardRooms:
     @staticmethod
     def _client():
         from fastapi.testclient import TestClient
-        from computer_use_agent.monitor_server import app
+        from cctv_audit.monitor_server import app
 
         return TestClient(app)
 
@@ -4045,7 +4045,7 @@ class TestDashboardRooms:
     def test_idle_rooms_are_evicted_before_the_cap(self):
         # `/api/event` is authenticated, but a bug upstream that stamped a
         # fresh id on every frame would otherwise be a slow memory leak.
-        from computer_use_agent import monitor_server as ms
+        from cctv_audit import monitor_server as ms
 
         client = self._client()
         for i in range(ms._MAX_ROOMS + 20):
@@ -4053,7 +4053,7 @@ class TestDashboardRooms:
         assert len(ms._rooms) <= ms._MAX_ROOMS
 
     def test_a_watched_room_is_never_evicted(self):
-        from computer_use_agent import monitor_server as ms
+        from cctv_audit import monitor_server as ms
 
         client = self._client()
         with client.websocket_connect("/ws?job=keepme") as ws:
@@ -4076,8 +4076,8 @@ class TestTheFooterNamesTheModelThatIsActuallyRunning:
     def test_the_label_is_built_from_the_running_config(self, monkeypatch):
         import dataclasses
 
-        from computer_use_agent import monitor
-        from computer_use_agent.config import config as real_config
+        from cctv_audit import monitor
+        from cctv_audit.config import config as real_config
 
         monkeypatch.setattr(monitor, "config", dataclasses.replace(
             real_config,
@@ -4094,7 +4094,7 @@ class TestTheFooterNamesTheModelThatIsActuallyRunning:
 
     def test_no_model_name_is_written_into_the_page(self):
         # The whole failure mode: a name in the HTML cannot go stale loudly.
-        from computer_use_agent.monitor import HTML_PAGE
+        from cctv_audit.monitor import HTML_PAGE
 
         assert "Computer Use" not in HTML_PAGE
         assert "3.5 Flash" not in HTML_PAGE
@@ -4110,7 +4110,7 @@ class TestTheFooterNamesTheModelThatIsActuallyRunning:
         which is why it is still in this codebase's comments -- but the wire
         name is not what goes on a screen a customer reads.
         """
-        from computer_use_agent.monitor import HTML_PAGE, engine_label
+        from cctv_audit.monitor import HTML_PAGE, engine_label
 
         assert "Vertex AI" not in HTML_PAGE
         assert "Vertex AI" not in engine_label()
@@ -4126,7 +4126,7 @@ class TestTheFooterNamesTheModelThatIsActuallyRunning:
         # thing here that can rot silently again. Two copies exist -- the idle
         # placeholder in the page and `_PLATFORM` -- and this is what stops
         # them drifting the way the model name did.
-        from computer_use_agent.monitor import _PLATFORM, HTML_PAGE, engine_label
+        from cctv_audit.monitor import _PLATFORM, HTML_PAGE, engine_label
 
         assert "Agent Platform" in _PLATFORM
         assert _PLATFORM in HTML_PAGE
@@ -4135,12 +4135,12 @@ class TestTheFooterNamesTheModelThatIsActuallyRunning:
     def test_an_idle_dashboard_names_no_model_at_all(self):
         # Better than naming the last run's model to someone who just opened
         # the page: it is the one string that is true before anything runs.
-        from computer_use_agent.monitor_server import _blank_state
+        from cctv_audit.monitor_server import _blank_state
 
         assert _blank_state()["engine"] == ""
 
     def test_starting_a_run_tells_the_dashboard_which_models(self):
-        from computer_use_agent.monitor import BrowserMonitorClient
+        from cctv_audit.monitor import BrowserMonitorClient
 
         sent = []
         client = BrowserMonitorClient.__new__(BrowserMonitorClient)
@@ -4168,13 +4168,13 @@ class TestAnEmptyViolationListIsNotAPassMark:
     """
 
     def test_no_copy_of_the_placeholder_claims_compliance(self):
-        from computer_use_agent.monitor import HTML_PAGE
+        from cctv_audit.monitor import HTML_PAGE
 
         assert "未发现不符合" not in HTML_PAGE
         assert "✅ 当前抽检片段" not in HTML_PAGE
 
     def test_both_copies_were_changed_not_just_the_one_that_is_easy_to_find(self):
-        from computer_use_agent.monitor import HTML_PAGE
+        from cctv_audit.monitor import HTML_PAGE
 
         # The static placeholder and the renderer's. If a third appears this
         # fails, which is the right time to notice.
@@ -4194,7 +4194,7 @@ class TestAFinishedRunSaysSoInsteadOfShowingNothing:
 
     @pytest.fixture(autouse=True)
     def _fresh_rooms(self):
-        from computer_use_agent import monitor_server as ms
+        from cctv_audit import monitor_server as ms
 
         ms._rooms.clear()
         ms._rooms[""] = ms.Room("")
@@ -4205,7 +4205,7 @@ class TestAFinishedRunSaysSoInsteadOfShowingNothing:
     @staticmethod
     def _client():
         from fastapi.testclient import TestClient
-        from computer_use_agent.monitor_server import app
+        from cctv_audit.monitor_server import app
 
         return TestClient(app)
 
@@ -4273,7 +4273,7 @@ class TestTheAnalysisModeIsInTheAnswer:
     def test_preflight_carries_the_mode_even_on_the_paths_that_forget_things(self):
         # `default_factory`, not a value passed at each construction site:
         # preflight returns from four places and one of them is the error path.
-        from computer_use_agent.pipeline import PreflightResult
+        from cctv_audit.pipeline import PreflightResult
 
         out = PreflightResult(ok=False, target="x", platform="p").as_dict()
         assert out["analysis_mode"] in ("static", "agentic")
@@ -4285,7 +4285,7 @@ class TestTheAnalysisModeIsInTheAnswer:
         # That is our opinion of the setting sitting in a line the customer
         # reads as a statement of fact about their job, so it is gone: the
         # mode's name and the shape of the run, nothing else.
-        from computer_use_agent.server import _describe_analysis
+        from cctv_audit.server import _describe_analysis
 
         agentic = _describe_analysis({"analysis_mode": "agentic", "analysis_window_seconds": 60})
         assert agentic == "分析方式：agentic，60 秒一段"
@@ -4299,13 +4299,13 @@ class TestTheAnalysisModeIsInTheAnswer:
     def test_an_unrecognised_mode_says_nothing_rather_than_guessing(self):
         # A job whose preflight predates this field falls back to the running
         # config; a mode nobody knows must not be labelled as one we do.
-        from computer_use_agent.server import _describe_analysis
+        from cctv_audit.server import _describe_analysis
 
         assert _describe_analysis({"analysis_mode": "something-new"}) == ""
 
     def test_it_appears_next_to_the_capture_mode_the_customer_already_gets(self):
-        from computer_use_agent.jobs import Job
-        from computer_use_agent.server import _describe_preflight
+        from cctv_audit.jobs import Job
+        from cctv_audit.server import _describe_preflight
 
         job = Job(
             user_id="u", job_id="abc123", target="t", state="ready",
@@ -4326,13 +4326,13 @@ class TestReadingAVideoStraightOutOfABucket:
     """Plan C: the customer's own SOP recordings are files, not web pages."""
 
     def test_a_normal_uri_splits_into_bucket_and_object(self):
-        from computer_use_agent.capture.gcs_video import parse_gs_uri
+        from cctv_audit.capture.gcs_video import parse_gs_uri
 
         assert parse_gs_uri("gs://my-bucket/sop/开店流程.mp4") == ("my-bucket", "sop/开店流程.mp4")
         assert parse_gs_uri("  gs://my-bucket/a.mp4  ") == ("my-bucket", "a.mp4")
 
     def test_the_three_things_people_actually_paste_wrong_each_say_what_is_wrong(self):
-        from computer_use_agent.capture.gcs_video import BadGcsUri, parse_gs_uri
+        from cctv_audit.capture.gcs_video import BadGcsUri, parse_gs_uri
 
         with pytest.raises(BadGcsUri, match="没给文件"):
             parse_gs_uri("gs://my-bucket")
@@ -4345,7 +4345,7 @@ class TestReadingAVideoStraightOutOfABucket:
         # This string is about to be interpolated into a URL. A name carrying
         # an `@` or a `:` out of the host position is not a naming-rules
         # quibble, it is a request to a different server.
-        from computer_use_agent.capture.gcs_video import BadGcsUri, parse_gs_uri
+        from cctv_audit.capture.gcs_video import BadGcsUri, parse_gs_uri
 
         for bad in ("gs://evil.com:8080/x.mp4", "gs://a@b/x.mp4", "gs://-lead/x.mp4"):
             with pytest.raises(BadGcsUri):
@@ -4355,7 +4355,7 @@ class TestReadingAVideoStraightOutOfABucket:
         # `?alt=media` on the JSON API, because the object name has to be
         # percent-encoded including its slashes. A raw `?` or `#` in a name
         # would otherwise truncate the path and fetch a different object.
-        from computer_use_agent.capture.gcs_video import media_url
+        from cctv_audit.capture.gcs_video import media_url
 
         url = media_url("b", "sop/v1 final#2.mp4")
         assert "/o/sop%2Fv1%20final%232.mp4?alt=media" in url
@@ -4364,7 +4364,7 @@ class TestReadingAVideoStraightOutOfABucket:
     def test_routing_is_loose_so_a_broken_gs_uri_still_gets_a_gs_complaint(self):
         # If `gs://bucket` fell through to the browser it would come back
         # "打不开这个视频", which sends the customer looking in the wrong place.
-        from computer_use_agent.capture.gcs_video import is_gcs_uri
+        from cctv_audit.capture.gcs_video import is_gcs_uri
 
         assert is_gcs_uri("gs://bucket")
         assert is_gcs_uri("GS://Bucket/a.mp4")
@@ -4375,14 +4375,14 @@ class TestReadingAVideoStraightOutOfABucket:
         # "Server returned 403 Forbidden" is not actionable until somebody says
         # whose permission it is -- and on day one it is always ours, on their
         # bucket.
-        from computer_use_agent.capture.gcs_video import _explain
+        from cctv_audit.capture.gcs_video import _explain
 
         assert "storage.objectViewer" in _explain("b", "o.mp4", "Server returned 403 Forbidden")
         assert "不存在" in _explain("b", "o.mp4", "Server returned 404 Not Found")
         assert "gs://b/o.mp4" in _explain("b", "o.mp4", "whatever else")
 
     def test_a_live_or_unfinalised_recording_reports_no_duration_rather_than_a_fake_one(self):
-        from computer_use_agent.capture.gcs_video import _duration_of
+        from cctv_audit.capture.gcs_video import _duration_of
 
         assert _duration_of({"format": {"duration": "180.5"}}) == 180.5
         assert _duration_of({"format": {"duration": "inf"}}) is None
@@ -4395,7 +4395,7 @@ class TestTheEntranceRecognisesABucketPath:
     """A `gs://` URI pasted into GE has to survive the whole way in."""
 
     def test_from_fields_accepts_it(self):
-        from computer_use_agent.intent import from_fields
+        from cctv_audit.intent import from_fields
 
         intent = from_fields("gs://bucket/sop/a.mp4", start="05:00", end="07:00")
         assert intent.request.target == "gs://bucket/sop/a.mp4"
@@ -4405,20 +4405,20 @@ class TestTheEntranceRecognisesABucketPath:
     def test_a_half_written_uri_is_caught_while_the_customer_is_still_here(self):
         # Not a minute later inside a preflight, by which point the reply is
         # "打不开这个视频" and they have moved on.
-        from computer_use_agent.capture.gcs_video import BadGcsUri
-        from computer_use_agent.intent import from_fields
+        from cctv_audit.capture.gcs_video import BadGcsUri
+        from cctv_audit.intent import from_fields
 
         with pytest.raises(BadGcsUri):
             from_fields("gs://bucket", start=0)
 
     def test_a_shop_name_is_still_not_an_address(self):
-        from computer_use_agent.intent import from_fields
+        from cctv_audit.intent import from_fields
 
         with pytest.raises(ValueError, match="不是一个视频地址"):
             from_fields("望京店", start=0)
 
     def test_the_offline_fallback_finds_one_in_a_sentence(self):
-        from computer_use_agent.intent import _URL_RE
+        from cctv_audit.intent import _URL_RE
 
         found = _URL_RE.search("按 chagee-store-v1 稽核 gs://chagee-sop/开店/v3.mp4，从 05:00 看 2 分钟")
         assert found and found.group(0) == "gs://chagee-sop/开店/v3.mp4"
@@ -4427,7 +4427,7 @@ class TestTheEntranceRecognisesABucketPath:
         # `\S+` used to swallow "，从" and hand the whole thing to ffprobe as
         # the address. Not a gs:// problem -- http has always had it, it just
         # took writing a Chinese-punctuation test to notice.
-        from computer_use_agent.intent import _URL_RE
+        from cctv_audit.intent import _URL_RE
 
         for text, want in [
             ("稽核 https://x.com/v?a=1，从 05:00 开始", "https://x.com/v?a=1"),
@@ -4439,13 +4439,13 @@ class TestTheEntranceRecognisesABucketPath:
     def test_a_path_may_still_contain_chinese_characters(self):
         # Only the punctuation is excluded. Object names like `开店/v3.mp4` are
         # exactly what the customer's bucket looks like.
-        from computer_use_agent.intent import _URL_RE
+        from cctv_audit.intent import _URL_RE
 
         assert _URL_RE.search("gs://桶/开店流程/第三版.mp4").group(0) == "gs://桶/开店流程/第三版.mp4"
 
     def test_the_ge_reply_calls_it_what_it_is(self):
-        from computer_use_agent.jobs import Job
-        from computer_use_agent.server import _describe_preflight
+        from cctv_audit.jobs import Job
+        from cctv_audit.server import _describe_preflight
 
         job = Job(
             user_id="u", job_id="j", target="gs://b/a.mp4", state="ready",
@@ -4469,7 +4469,7 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
     """
 
     def _source(self, mode="file", uri="gs://b/a.mp4", duration=None):
-        from computer_use_agent.capture.types import CaptureSource
+        from cctv_audit.capture.types import CaptureSource
 
         return CaptureSource(
             mode=mode, url="https://storage.googleapis.com/x?alt=media",
@@ -4478,7 +4478,7 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
         )
 
     def _producer(self, tmp_path, *, start=300.0, duration=120.0, source=None):
-        from computer_use_agent.pipeline import AuditPipeline, AuditRequest
+        from cctv_audit.pipeline import AuditPipeline, AuditRequest
 
         request = AuditRequest(
             target="gs://b/a.mp4", start_seconds=start, duration_seconds=duration)
@@ -4487,7 +4487,7 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
             None, None, tmp_path, request))
 
     def test_the_whole_object_becomes_exactly_one_clip(self, tmp_path):
-        from computer_use_agent.capture.gcs_video import WholeFileProducer
+        from cctv_audit.capture.gcs_video import WholeFileProducer
 
         producer = self._producer(tmp_path)
         assert isinstance(producer, WholeFileProducer)
@@ -4531,7 +4531,7 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
         # `url` is the HTTPS endpoint ffmpeg reads; Vertex only accepts `gs://`.
         # Building on a source that has the first and not the second would send
         # a signed URL to the model and fail deep inside the request.
-        from computer_use_agent.capture.gcs_video import WholeFileProducer
+        from cctv_audit.capture.gcs_video import WholeFileProducer
 
         with pytest.raises(ValueError):
             WholeFileProducer(self._source(uri=None))
@@ -4554,7 +4554,7 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
         # old arithmetic would have called that "只覆盖到 30:00，请求的是到
         # 12:00" -- understating a run that watched everything, which is the
         # one direction a coverage report must never err in.
-        from computer_use_agent.capture.types import CaptureSource
+        from cctv_audit.capture.types import CaptureSource
 
         source = CaptureSource(mode="file", url="u", object_uri="gs://b/a.mp4",
                                duration_seconds=1800.0)
@@ -4573,8 +4573,8 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
         # 05:00 of a 3-minute file. On Plan A that is "nothing to audit"; here
         # the whole three minutes are going to the model regardless, so
         # refusing the job would refuse a perfectly auditable video.
-        from computer_use_agent.capture.types import CaptureSource
-        from computer_use_agent.pipeline import AuditPipeline, AuditRequest, _Session
+        from cctv_audit.capture.types import CaptureSource
+        from cctv_audit.pipeline import AuditPipeline, AuditRequest, _Session
 
         session = _Session(
             page=None, context=None, navigator=None,
@@ -4600,7 +4600,7 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
         assert result.as_dict()["analysis_scope"] == "whole_file"
 
     def test_the_scope_of_every_other_plan_is_still_windows(self):
-        from computer_use_agent.pipeline import PreflightResult
+        from cctv_audit.pipeline import PreflightResult
 
         for mode in ("stream", "screen", ""):
             assert PreflightResult(
@@ -4611,8 +4611,8 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
         # The customer typed a time range and is about to get a report that
         # covers everything. Being told that before confirming is the whole
         # difference between "it ignored me" and "it told me".
-        from computer_use_agent.jobs import Job
-        from computer_use_agent.server import _describe_preflight
+        from cctv_audit.jobs import Job
+        from cctv_audit.server import _describe_preflight
 
         job = Job(
             user_id="u", job_id="j", target="gs://b/a.mp4", state="ready",
@@ -4632,7 +4632,7 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
         # Firestore still holds jobs whose preflight has no `analysis_scope`.
         # Answering "windows" for one of them would promise a live picture that
         # this path has never had.
-        from computer_use_agent.server import _is_whole_file
+        from cctv_audit.server import _is_whole_file
 
         assert _is_whole_file({"capture_mode": "file"}) is True
         assert _is_whole_file({"capture_mode": "stream"}) is False
@@ -4642,7 +4642,7 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
             self, tmp_path, monkeypatch):
         # A remote clip has `path=None`. Handing that to ffmpeg is a TypeError
         # inside the one code path whose job is to preserve proof.
-        from computer_use_agent import store as store_mod
+        from cctv_audit import store as store_mod
 
         asked = {}
 
@@ -4665,7 +4665,7 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
         assert locator and asked["uri"] == "gs://b/a.mp4" and asked["offset"] == 91.0
 
     def _remote_clip(self):
-        from computer_use_agent.capture.types import Clip
+        from cctv_audit.capture.types import Clip
 
         return Clip(index=0, path=None, uri="gs://b/a.mp4", start_offset=0.0,
                     end_offset=600.0, wall_clock_start=0.0, source_mode="file",
@@ -4675,7 +4675,7 @@ class TestPlanCHandsOverTheWholeObjectAndCapturesNothing:
         # Both would mean two answers to "where are the bytes" and the readers
         # disagree about which wins; neither means the analyser has nothing to
         # send and finds out one request too late.
-        from computer_use_agent.capture.types import Clip
+        from cctv_audit.capture.types import Clip
 
         for kwargs in ({}, {"path": Path("/tmp/a.mp4"), "uri": "gs://b/a.mp4"}):
             with pytest.raises(ValueError):
@@ -4692,14 +4692,14 @@ class TestTheModelIsGivenTheAddressNotTheBytes:
     """The remote branch of `analyze`, and the prompt that goes with it."""
 
     def _clip(self, uri="gs://b/a.mp4", **kw):
-        from computer_use_agent.capture.types import Clip
+        from cctv_audit.capture.types import Clip
 
         return Clip(index=0, path=None, uri=uri, start_offset=0.0, end_offset=600.0,
                     wall_clock_start=0.0, source_mode="file",
                     whole_video=kw.pop("whole_video", True), **kw)
 
     def test_the_mime_type_follows_the_object_name(self):
-        from computer_use_agent.capture.gcs_video import mime_for
+        from cctv_audit.capture.gcs_video import mime_for
 
         assert mime_for("gs://b/a.mp4") == "video/mp4"
         assert mime_for("gs://b/A.MOV") == "video/quicktime"
@@ -4714,7 +4714,7 @@ class TestTheModelIsGivenTheAddressNotTheBytes:
         # goes through untouched. `read_bytes` fails the test rather than
         # returning something, because a Plan C run that reads the file works
         # right up until the file is bigger than the instance's memory.
-        from computer_use_agent.analyzer import video_analyzer as va
+        from cctv_audit.analyzer import video_analyzer as va
 
         monkeypatch.setattr(
             Path, "read_bytes",
@@ -4757,8 +4757,8 @@ class TestAPagelessRunDoesNotPretendToHaveAPage:
     """`_Session.page` is None on Plan C, and four things used to assume it was not."""
 
     def _session(self, page=None, duration=None):
-        from computer_use_agent.capture.types import CaptureSource
-        from computer_use_agent.pipeline import _Session
+        from cctv_audit.capture.types import CaptureSource
+        from cctv_audit.pipeline import _Session
 
         return _Session(
             page=page, context=None, navigator=None,
@@ -4773,7 +4773,7 @@ class TestAPagelessRunDoesNotPretendToHaveAPage:
     def test_an_unreadable_duration_is_none_not_an_attribute_error(self):
         # Catching the AttributeError from a None navigator would produce the
         # same None, and would also hide a real navigator fault behind it.
-        from computer_use_agent.pipeline import AuditPipeline
+        from cctv_audit.pipeline import AuditPipeline
 
         pipeline = AuditPipeline()
         assert asyncio.run(pipeline._video_duration(self._session())) is None
@@ -4783,7 +4783,7 @@ class TestAPagelessRunDoesNotPretendToHaveAPage:
         # The cover is the part of the preflight reply that proves we opened
         # the customer's video and not somebody else's file. Losing it on Plan C
         # would be a silent downgrade.
-        from computer_use_agent import pipeline as pipeline_mod
+        from cctv_audit import pipeline as pipeline_mod
 
         asked = {}
 
@@ -4805,7 +4805,7 @@ class TestAPagelessRunDoesNotPretendToHaveAPage:
         assert asked["offset"] == 300.0 and asked["data"] == b"JPEGBYTES"
 
     def test_a_missing_cover_is_still_only_a_missing_cover(self, monkeypatch):
-        from computer_use_agent import pipeline as pipeline_mod
+        from cctv_audit import pipeline as pipeline_mod
 
         async def fake_grab(source, offset, **kw):
             return None
@@ -4827,8 +4827,8 @@ class TestTheSessionForksOnceAndOnlyOnce:
     """Routing lives in `_capture_session`; nothing downstream branches again."""
 
     def test_a_gs_target_never_starts_a_browser(self, monkeypatch):
-        from computer_use_agent import pipeline as pipeline_mod
-        from computer_use_agent.capture.types import CaptureSource
+        from cctv_audit import pipeline as pipeline_mod
+        from cctv_audit.capture.types import CaptureSource
 
         started = []
         monkeypatch.setattr(
@@ -4852,7 +4852,7 @@ class TestTheSessionForksOnceAndOnlyOnce:
         assert session.platform == "gcs"
 
     def test_an_http_target_still_goes_to_the_browser(self, monkeypatch):
-        from computer_use_agent import pipeline as pipeline_mod
+        from cctv_audit import pipeline as pipeline_mod
 
         went = []
 

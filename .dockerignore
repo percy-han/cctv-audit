@@ -2,9 +2,9 @@
 # Build, this one what reaches the image. A local `docker build` obeys only
 # this file, so the secrets have to be listed in both.
 auth/
-computer_use_agent/.env
+cctv_audit/.env
 *.env
-computer_use_agent/checkpoints/
+cctv_audit/checkpoints/
 .work/
 .venv/
 .git/
@@ -15,5 +15,5 @@ __pycache__/
 # Local `adk web` state: a session database from this workstation. It is not a
 # secret, but it does get COPYed into the image, where it is one more file
 # nobody put there on purpose.
-computer_use_agent/.adk/
+cctv_audit/.adk/
 .DS_Store

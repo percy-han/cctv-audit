@@ -225,7 +225,7 @@ current_background_task.cancel()   # 记成 "被新发起的抽检任务取代"
 我不单方面动别人分支上的东西，所以只记在这里：
 
 - `main` 上提交了 `monitor_server.log`（20487 行）和
-  `computer_use_agent/checkpoints/audit_records.jsonl`（28 条稽核记录）。
+  `cctv_audit/checkpoints/audit_records.jsonl`（28 条稽核记录）。
   本分支的 `.gitignore` 把 `checkpoints/` 整个挡掉，理由是**稽核记录涉及可识别的人**。
   `main` 上没有证据帧 JPG，只有记录和日志。
 - 仓库现在是 private，所以上面这条不是外泄，

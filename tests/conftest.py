@@ -16,7 +16,7 @@
 
 Eleven tests construct a real `AuditPipeline`, whose `__init__` runs
 `config.validate()` and refuses to build without a GCP project. On the machine
-this suite was written on that project came from `computer_use_agent/.env` --
+this suite was written on that project came from `cctv_audit/.env` --
 which is gitignored, because it is a developer's local settings. So the suite
 passed here and failed everywhere else: a fresh clone of the pushed branch
 scored 11 failed / 468 passed, all of them `GOOGLE_CLOUD_PROJECT is not set`.
@@ -34,7 +34,7 @@ because the former wins in `config.py`, which makes this beat a .env that sets
 the latter.
 
 Assignment at import time, not a fixture: `config` is a module-level frozen
-dataclass built from the environment when `computer_use_agent.config` is first
+dataclass built from the environment when `cctv_audit.config` is first
 imported. A fixture runs after collection has already imported it.
 """
 

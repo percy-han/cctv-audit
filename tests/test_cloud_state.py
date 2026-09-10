@@ -34,7 +34,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from computer_use_agent.jobs import (
+from cctv_audit.jobs import (
     BackgroundRunner,
     Job,
     MemoryJobStore,
@@ -79,7 +79,7 @@ class TestAJobCannotBeReadWithoutNamingItsOwner:
     async def test_the_store_has_no_way_to_ask_for_a_job_by_id_alone(self):
         # The guarantee above is only real if the unscoped call does not exist.
         # If someone adds one, this fails and they have to think about it.
-        from computer_use_agent.jobs import JobStore
+        from cctv_audit.jobs import JobStore
 
         for name in ("get", "update", "add_record", "records"):
             args = JobStore.__dict__[name].__code__.co_varnames
@@ -254,7 +254,7 @@ class TestEvidenceGoesSomewhereItCanBeLookedAtLater:
 
     @pytest.mark.asyncio
     async def test_a_local_frame_is_recorded_by_its_key_not_its_absolute_path(self, tmp_path):
-        from computer_use_agent.artifacts import LocalArtifactSink
+        from cctv_audit.artifacts import LocalArtifactSink
 
         sink = LocalArtifactSink(root=tmp_path)
         key = await sink.put("job7/evidence/w1.jpg", b"jpegbytes", "image/jpeg")
@@ -266,7 +266,7 @@ class TestEvidenceGoesSomewhereItCanBeLookedAtLater:
     async def test_a_key_cannot_climb_out_of_the_data_directory(self, tmp_path):
         # The key is built from a job id and a rule id, both ours -- but it is
         # the only string in that module that becomes a filesystem path.
-        from computer_use_agent.artifacts import LocalArtifactSink
+        from cctv_audit.artifacts import LocalArtifactSink
 
         sink = LocalArtifactSink(root=tmp_path / "data")
         (tmp_path / "data").mkdir()
@@ -277,7 +277,7 @@ class TestEvidenceGoesSomewhereItCanBeLookedAtLater:
 
     @pytest.mark.asyncio
     async def test_putting_a_file_already_in_place_does_not_copy_it(self, tmp_path):
-        from computer_use_agent.artifacts import LocalArtifactSink
+        from cctv_audit.artifacts import LocalArtifactSink
 
         sink = LocalArtifactSink(root=tmp_path)
         frame = tmp_path / "evidence" / "w1.jpg"
@@ -289,7 +289,7 @@ class TestEvidenceGoesSomewhereItCanBeLookedAtLater:
 
     @pytest.mark.asyncio
     async def test_a_missing_frame_reports_nothing_rather_than_a_broken_link(self, tmp_path):
-        from computer_use_agent.artifacts import LocalArtifactSink
+        from cctv_audit.artifacts import LocalArtifactSink
 
         sink = LocalArtifactSink(root=tmp_path)
         assert await sink.put_file("e/w1.jpg", tmp_path / "nope.jpg", "image/jpeg") is None
@@ -299,7 +299,7 @@ class TestEvidenceGoesSomewhereItCanBeLookedAtLater:
         # `record()` puts this None straight into `evidence_frame`, which the
         # report renders as "no reviewable still". An exception here would
         # instead lose the violation the frame was evidence for.
-        from computer_use_agent.artifacts import GcsArtifactSink
+        from cctv_audit.artifacts import GcsArtifactSink
 
         sink = GcsArtifactSink(bucket="b", prefix="audits")
 
@@ -332,9 +332,9 @@ class TestTheReportNamesPlacesThatStillExist:
     """
 
     def _store(self, tmp_path, monkeypatch, **kwargs):
-        from computer_use_agent.analyzer.sop import parse_rules
-        from computer_use_agent.store import AuditStore
-        from computer_use_agent import store as store_mod
+        from cctv_audit.analyzer.sop import parse_rules
+        from cctv_audit.store import AuditStore
+        from cctv_audit import store as store_mod
 
         # `_evidence_key` measures the evidence directory against `DATA_DIR`,
         # so the two have to be set together or the test proves nothing.
@@ -351,7 +351,7 @@ class TestTheReportNamesPlacesThatStillExist:
     def test_locally_the_paths_are_the_answer(self, tmp_path, monkeypatch):
         # Nothing was wired up, so this disk really is where the records are.
         # The report should keep saying so rather than inventing a URI.
-        from computer_use_agent.artifacts import LocalArtifactSink, set_artifact_sink
+        from cctv_audit.artifacts import LocalArtifactSink, set_artifact_sink
 
         set_artifact_sink(LocalArtifactSink(root=tmp_path))
         try:
@@ -363,7 +363,7 @@ class TestTheReportNamesPlacesThatStillExist:
         assert summary["evidence_dir"] == str(tmp_path / "evidence")
 
     def test_on_a_container_it_names_the_bucket_and_firestore(self, tmp_path, monkeypatch):
-        from computer_use_agent.artifacts import GcsArtifactSink, set_artifact_sink
+        from cctv_audit.artifacts import GcsArtifactSink, set_artifact_sink
 
         set_artifact_sink(GcsArtifactSink(bucket="b", prefix="audits"))
         try:
@@ -385,7 +385,7 @@ class TestTheReportNamesPlacesThatStillExist:
         # directory that exists, is spelled plausibly, and holds nothing.
         # `_save_evidence` and `_evidence_key` derive the key separately, so
         # this compares the two rather than trusting either.
-        from computer_use_agent.artifacts import GcsArtifactSink, set_artifact_sink
+        from cctv_audit.artifacts import GcsArtifactSink, set_artifact_sink
 
         sink = GcsArtifactSink(bucket="b", prefix="audits")
         set_artifact_sink(sink)
@@ -402,7 +402,7 @@ class TestTheReportNamesPlacesThatStillExist:
         # `summary()` runs at the end of every audit, including one that failed
         # on the way to GCS. Building a client to answer "where would this go"
         # would turn a rendering step into a network call that can fail.
-        from computer_use_agent.artifacts import GcsArtifactSink
+        from cctv_audit.artifacts import GcsArtifactSink
 
         sink = GcsArtifactSink(bucket="b", prefix="audits")
 
@@ -422,7 +422,7 @@ class TestTheReportNamesPlacesThatStillExist:
     def test_firestore_names_the_path_it_actually_writes_to(self):
         # An address that does not match the writes is worse than no address:
         # the reader concludes the records were never written.
-        from computer_use_agent.jobs import FirestoreJobStore, _document_safe
+        from cctv_audit.jobs import FirestoreJobStore, _document_safe
 
         store = FirestoreJobStore.__new__(FirestoreJobStore)
         store._database = "audits"
@@ -444,8 +444,8 @@ class TestTheReportNamesPlacesThatStillExist:
     async def test_the_service_tells_the_store_where_the_records_live(self, monkeypatch):
         # The store cannot know: it is handed a coroutine, not a destination.
         # If this wiring is dropped the report silently reverts to `/tmp`.
-        from computer_use_agent.audit_service import AuditService
-        from computer_use_agent.monitor import monitor
+        from cctv_audit.audit_service import AuditService
+        from cctv_audit.monitor import monitor
 
         # The dashboard is a separate service now, so this would be a real POST.
         monkeypatch.setattr(monitor, "fail_session", lambda *a, **k: None)
@@ -476,7 +476,7 @@ class TestTheStandardIsNeverSubstituted:
 
     @pytest.fixture(autouse=True)
     def _clean_cache(self):
-        from computer_use_agent.analyzer import sop
+        from cctv_audit.analyzer import sop
 
         sop.clear_sop_cache()
         yield
@@ -492,7 +492,7 @@ class TestTheStandardIsNeverSubstituted:
         """
         import types
 
-        from computer_use_agent.analyzer import sop
+        from cctv_audit.analyzer import sop
 
         settings = types.SimpleNamespace(
             sop_bucket="", sop_prefix="sop", default_sop_id="",
@@ -505,7 +505,7 @@ class TestTheStandardIsNeverSubstituted:
 
     @pytest.mark.asyncio
     async def test_naming_a_version_with_nowhere_to_store_versions_is_an_error(self, monkeypatch):
-        from computer_use_agent.analyzer import sop
+        from cctv_audit.analyzer import sop
 
         self._settings(monkeypatch, sop_bucket="")
         with pytest.raises(sop.SopUnavailable, match="chagee-store-v3"):
@@ -515,7 +515,7 @@ class TestTheStandardIsNeverSubstituted:
     async def test_a_bucket_with_no_version_named_is_an_error(self, monkeypatch):
         # Picking a version on the customer's behalf is the one thing this
         # must never do -- "v2 or v3" decides whether a finding is a finding.
-        from computer_use_agent.analyzer import sop
+        from cctv_audit.analyzer import sop
 
         self._settings(monkeypatch, sop_bucket="sop-bucket")
         with pytest.raises(sop.SopUnavailable, match="版本号"):
@@ -523,7 +523,7 @@ class TestTheStandardIsNeverSubstituted:
 
     @pytest.mark.asyncio
     async def test_a_fetch_failure_raises_instead_of_falling_back(self, monkeypatch):
-        from computer_use_agent.analyzer import sop
+        from cctv_audit.analyzer import sop
 
         self._settings(monkeypatch, sop_bucket="sop-bucket")
 
@@ -537,7 +537,7 @@ class TestTheStandardIsNeverSubstituted:
     @pytest.mark.asyncio
     async def test_a_version_id_cannot_walk_out_of_the_sop_prefix(self, monkeypatch):
         # The id arrives from a chat message via GE and becomes an object path.
-        from computer_use_agent.analyzer import sop
+        from cctv_audit.analyzer import sop
 
         self._settings(monkeypatch, sop_bucket="sop-bucket")
 
@@ -551,7 +551,7 @@ class TestTheStandardIsNeverSubstituted:
 
     @pytest.mark.asyncio
     async def test_a_fetched_version_is_parsed_and_tagged(self, monkeypatch):
-        from computer_use_agent.analyzer import sop
+        from cctv_audit.analyzer import sop
 
         self._settings(monkeypatch, sop_bucket="sop-bucket", sop_prefix="sop")
 
@@ -585,7 +585,7 @@ rules:
     async def test_no_bucket_and_no_version_is_the_local_file(self, monkeypatch):
         # Not a fallback: on a workstation `SOP_RULES_PATH` *is* the standard,
         # rather than one of several the customer chooses between.
-        from computer_use_agent.analyzer import sop
+        from cctv_audit.analyzer import sop
 
         self._settings(monkeypatch, sop_bucket="", default_sop_id="")
 
@@ -596,8 +596,8 @@ rules:
     def test_every_record_says_which_standard_judged_it(self, tmp_path):
         # "Was this judged under v2 or v3" is the first question asked when a
         # finding is disputed, and by then the standard has moved on.
-        from computer_use_agent.analyzer.sop import parse_rules
-        from computer_use_agent.store import AuditStore
+        from cctv_audit.analyzer.sop import parse_rules
+        from cctv_audit.store import AuditStore
 
         rules = parse_rules(
             "version: 3\nrules:\n  - {id: A, name: n, description: d}\n",
@@ -615,7 +615,7 @@ class TestAStructuredRequestIsCheckedNotTrusted:
     person does, and the refusals have to be the same ones."""
 
     def test_clock_strings_and_numbers_mean_the_same_thing(self):
-        from computer_use_agent.intent import from_fields
+        from cctv_audit.intent import from_fields
 
         by_number = from_fields("https://x/v", start=900, end=1500)
         by_clock = from_fields("https://x/v", start="15:00", end="25:00")
@@ -626,7 +626,7 @@ class TestAStructuredRequestIsCheckedNotTrusted:
 
     def test_a_shop_name_is_not_a_video_address(self):
         # Turning one into a search would audit whatever came back first.
-        from computer_use_agent.intent import from_fields
+        from cctv_audit.intent import from_fields
 
         with pytest.raises(ValueError):
             from_fields("霸王茶姬望京店")
@@ -634,19 +634,19 @@ class TestAStructuredRequestIsCheckedNotTrusted:
             from_fields("")
 
     def test_an_end_before_the_start_is_refused(self):
-        from computer_use_agent.intent import UnreadableTimeSpan, from_fields
+        from cctv_audit.intent import UnreadableTimeSpan, from_fields
 
         with pytest.raises(UnreadableTimeSpan):
             from_fields("https://x/v", start="15:00", end="14:00")
 
     def test_an_explicit_end_wins_over_an_inferred_duration(self):
-        from computer_use_agent.intent import from_fields
+        from cctv_audit.intent import from_fields
 
         got = from_fields("https://x/v", start=0, end=300, duration=99999)
         assert got.request.duration_seconds == 300.0
 
     def test_no_time_at_all_means_the_whole_recording(self):
-        from computer_use_agent.intent import from_fields
+        from cctv_audit.intent import from_fields
 
         got = from_fields("https://x/v")
         assert got.request.start_seconds == 0.0
@@ -655,12 +655,12 @@ class TestAStructuredRequestIsCheckedNotTrusted:
     def test_the_reading_is_echoed_back_for_a_human_to_check(self):
         # A misreading has to be visible in the first line of output, not at
         # the end of a four-minute run.
-        from computer_use_agent.intent import from_fields
+        from cctv_audit.intent import from_fields
 
         assert from_fields("https://x/v", start=900, end=1500).reading == "从 15:00 看到 25:00"
 
     def test_a_time_that_cannot_be_read_stops_the_run(self):
-        from computer_use_agent.intent import UnreadableTimeSpan, from_fields
+        from cctv_audit.intent import UnreadableTimeSpan, from_fields
 
         with pytest.raises(UnreadableTimeSpan):
             from_fields("https://x/v", start="高峰期")
@@ -694,7 +694,7 @@ def _preflight(source, *, start=0.0, duration=None, player_duration=None, page=N
     Built the way the rest of this suite builds pipelines: the real method on
     an object holding only what the method reads. Nothing here opens Chromium.
     """
-    from computer_use_agent.pipeline import AuditPipeline, AuditRequest, _Session
+    from cctv_audit.pipeline import AuditPipeline, AuditRequest, _Session
 
     pipeline = AuditPipeline.__new__(AuditPipeline)
     pipeline.on_status = None
@@ -722,7 +722,7 @@ class TestPreflightAnswersBeforeAnythingIsSpent:
     cannot, which is the whole reason the two are separate."""
 
     def _source(self, mode="stream", duration=None):
-        from computer_use_agent.capture.types import CaptureSource
+        from cctv_audit.capture.types import CaptureSource
 
         return CaptureSource(
             mode=mode, url="https://x/m.m4s", duration_seconds=duration,
@@ -731,7 +731,7 @@ class TestPreflightAnswersBeforeAnythingIsSpent:
 
     @pytest.fixture(autouse=True)
     def _local_sink(self, tmp_path, monkeypatch):
-        from computer_use_agent.artifacts import LocalArtifactSink, set_artifact_sink
+        from cctv_audit.artifacts import LocalArtifactSink, set_artifact_sink
 
         set_artifact_sink(LocalArtifactSink(root=tmp_path))
         yield
@@ -803,7 +803,7 @@ class TestPreflightAnswersBeforeAnythingIsSpent:
 
     @pytest.mark.asyncio
     async def test_an_unopenable_page_is_an_answer_not_a_stack_trace(self):
-        from computer_use_agent.pipeline import AuditPipeline, AuditRequest
+        from cctv_audit.pipeline import AuditPipeline, AuditRequest
 
         pipeline = AuditPipeline.__new__(AuditPipeline)
         pipeline.on_status = None
@@ -886,7 +886,7 @@ class _StubPipeline:
         self.ran = asyncio.Event()
 
     async def preflight(self, request, job_id="preflight"):
-        from computer_use_agent.pipeline import PreflightResult
+        from cctv_audit.pipeline import PreflightResult
 
         return self.preflight_result or PreflightResult(
             ok=True, target=request.target, platform="bilibili",
@@ -908,15 +908,15 @@ def service(monkeypatch, tmp_path):
     """A service on an in-memory store, with the browser stubbed out."""
     import functools
 
-    from computer_use_agent import audit_service as svc_mod
-    from computer_use_agent.jobs import BackgroundRunner
-    from computer_use_agent.store import AuditStore
+    from cctv_audit import audit_service as svc_mod
+    from cctv_audit.jobs import BackgroundRunner
+    from cctv_audit.store import AuditStore
 
     _StubPipeline.built = []
     built = _StubPipeline
 
     async def local_rules(sop_id=None):
-        from computer_use_agent.analyzer.sop import parse_rules
+        from cctv_audit.analyzer.sop import parse_rules
 
         return parse_rules(
             "version: 3\nrules:\n  - {id: A, name: n, description: d}\n",
@@ -935,7 +935,7 @@ def service(monkeypatch, tmp_path):
 
 
 def _request(target="https://x/v", start=0.0, duration=600.0):
-    from computer_use_agent.pipeline import AuditRequest
+    from cctv_audit.pipeline import AuditRequest
 
     return AuditRequest(target=target, start_seconds=start, duration_seconds=duration)
 
@@ -962,7 +962,7 @@ class TestNothingIsSpentBeforeTheCustomerSaysYes:
 
     @pytest.mark.asyncio
     async def test_a_refused_preflight_is_still_on_the_record(self, service):
-        from computer_use_agent.pipeline import PreflightResult
+        from cctv_audit.pipeline import PreflightResult
 
         class Refusing(_StubPipeline):
             async def preflight(self, request, job_id="preflight"):
@@ -986,8 +986,8 @@ class TestNothingIsSpentBeforeTheCustomerSaysYes:
     ):
         # Finding out after a minute of navigation wastes the minute and tells
         # the customer nothing they could not have been told immediately.
-        from computer_use_agent import audit_service as svc_mod
-        from computer_use_agent.analyzer import SopUnavailable
+        from cctv_audit import audit_service as svc_mod
+        from cctv_audit.analyzer import SopUnavailable
 
         async def missing(_sop_id=None):
             raise SopUnavailable("取不到稽核标准 gs://b/sop/v9.yaml：404")
@@ -1065,7 +1065,7 @@ class TestConfirmingStartsTheAuditAndReturns:
 
     @pytest.mark.asyncio
     async def test_a_rejected_job_cannot_be_confirmed(self, service):
-        from computer_use_agent.pipeline import PreflightResult
+        from cctv_audit.pipeline import PreflightResult
 
         class Refusing(_StubPipeline):
             async def preflight(self, request, job_id="preflight"):
@@ -1111,7 +1111,7 @@ def _impatient(monkeypatch, *, first=0.05, stall=0.05, hard=100.0, cleanup=0.2):
     audit and the wrong size for a test suite. Only the numbers move; the
     decisions being tested are the production ones.
     """
-    from computer_use_agent import audit_service as svc_mod
+    from cctv_audit import audit_service as svc_mod
 
     monkeypatch.setattr(svc_mod, "_WATCHDOG_TICK_SECONDS", 0.01)
     monkeypatch.setattr(svc_mod, "_FIRST_WINDOW_SECONDS", first)
@@ -1303,7 +1303,7 @@ class TestAskingHowItIsGoing:
 
     @pytest.mark.asyncio
     async def test_progress_is_written_as_windows_come_back(self, service, monkeypatch):
-        from computer_use_agent import audit_service as svc_mod
+        from cctv_audit import audit_service as svc_mod
 
         monkeypatch.setattr(svc_mod, "_PROGRESS_EVERY_SECONDS", 0.0)
         ready = await service.preflight("z@example.com", _request())
@@ -1332,7 +1332,7 @@ class TestAskingHowItIsGoing:
     async def test_a_broken_report_does_not_strand_the_job_at_running(self, service, monkeypatch):
         # The audit finished and the numbers are in `summary`. Losing the
         # rendered version must not leave a customer polling forever.
-        from computer_use_agent.agent import CctvAuditAgent
+        from cctv_audit.agent import CctvAuditAgent
 
         def explode(_summary, _store):
             raise KeyError("windows_failed")
@@ -1361,7 +1361,7 @@ class TestBothEntrancesJudgeByTheSameStandard:
         # `load_rules()` ignores SOP_BUCKET and DEFAULT_SOP_ID entirely. If it
         # comes back into agent.py the divergence comes back with it, so the
         # import is what this guards -- the behaviour is untestable without ADK.
-        import computer_use_agent.agent as agent_mod
+        import cctv_audit.agent as agent_mod
 
         assert not hasattr(agent_mod, "load_rules"), (
             "agent.py must resolve the standard through load_rules_for()"
@@ -1372,10 +1372,10 @@ class TestBothEntrancesJudgeByTheSameStandard:
         # Not `config.sop_rules_path`: once the standard is fetched from a
         # bucket, the local filename setting is no longer what is in force, and
         # a banner that keeps printing it is confidently wrong.
-        from computer_use_agent.agent import CctvAuditAgent
-        from computer_use_agent.analyzer.sop import SopRule, SopRuleSet
-        from computer_use_agent.intent import Intent
-        from computer_use_agent.pipeline import AuditRequest
+        from cctv_audit.agent import CctvAuditAgent
+        from cctv_audit.analyzer.sop import SopRule, SopRuleSet
+        from cctv_audit.intent import Intent
+        from cctv_audit.pipeline import AuditRequest
 
         rules = SopRuleSet(
             version=3,
@@ -1413,7 +1413,7 @@ class TestTheOperatorIsToldWhenThePictureStops:
             self.notes.append((action, detail))
 
     def _announce(self, monitor, event, payload):
-        from computer_use_agent.audit_service import _announce
+        from cctv_audit.audit_service import _announce
 
         _announce(monitor, event, payload)
 

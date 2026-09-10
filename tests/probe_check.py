@@ -38,11 +38,11 @@ import sys
 async def _probe(url: str, wait_seconds: float, all_candidates: bool) -> int:
     from playwright.async_api import async_playwright
 
-    from computer_use_agent.capture.ffmpeg_util import probe_stream
-    from computer_use_agent.capture.probe import StreamProbe
-    from computer_use_agent.config import config
-    from computer_use_agent.navigator import for_target, platform_of
-    from computer_use_agent.navigator.base import load_state
+    from cctv_audit.capture.ffmpeg_util import probe_stream
+    from cctv_audit.capture.probe import StreamProbe
+    from cctv_audit.config import config
+    from cctv_audit.navigator import for_target, platform_of
+    from cctv_audit.navigator.base import load_state
 
     platform = platform_of(url)
     playwright = await async_playwright().start()

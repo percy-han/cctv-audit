@@ -59,9 +59,9 @@ def main() -> int:
     )
     logging.getLogger("cctv_audit").setLevel(logging.DEBUG)
 
-    from computer_use_agent.config import config
-    from computer_use_agent.pipeline import AuditPipeline, AuditRequest
-    from computer_use_agent.store import AuditStore
+    from cctv_audit.config import config
+    from cctv_audit.pipeline import AuditPipeline, AuditRequest
+    from cctv_audit.store import AuditStore
 
     problems = config.validate()
     if problems:
@@ -103,7 +103,7 @@ def main() -> int:
 
     # The report is what the user actually reads, so print the real thing
     # rather than a paraphrase of the summary dict.
-    from computer_use_agent.agent import CctvAuditAgent
+    from cctv_audit.agent import CctvAuditAgent
 
     print("\n" + "=" * 70)
     print("REPORT AS THE USER SEES IT\n")

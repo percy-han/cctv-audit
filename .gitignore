@@ -4,8 +4,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-computer_use_agent/.env
-computer_use_agent/.adk
+cctv_audit/.env
+cctv_audit/.adk
 
 # Live session cookies. Never commit these.
 auth/
@@ -15,7 +15,7 @@ auth/
 
 # Audit output: records and evidence frames contain footage of identifiable
 # people, so they stay local.
-computer_use_agent/checkpoints/
+cctv_audit/checkpoints/
 
 # The demo footage, which `deploy/demovideo/make_assets.sh` renders from
 # nothing in about a minute. Committing it would put 1.7 MB of synthetic MP4

@@ -54,10 +54,10 @@ export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
 # ------------------------------------------------------------
 # 4. Environment
 # ------------------------------------------------------------
-if [ -f "computer_use_agent/.env" ]; then
+if [ -f "cctv_audit/.env" ]; then
     set -a
     # shellcheck disable=SC1091
-    source computer_use_agent/.env 2>/dev/null || true
+    source cctv_audit/.env 2>/dev/null || true
     set +a
 fi
 
@@ -65,7 +65,7 @@ fi
 # project and hides a misconfiguration until the first API call fails.
 if [ -z "${GOOGLE_CLOUD_PROJECT:-}" ]; then
     echo "❌ GOOGLE_CLOUD_PROJECT is not set."
-    echo "   Copy computer_use_agent/.env.example to computer_use_agent/.env and fill it in."
+    echo "   Copy cctv_audit/.env.example to cctv_audit/.env and fill it in."
     exit 1
 fi
 
@@ -102,7 +102,7 @@ fi
 # ------------------------------------------------------------
 # 6. Live monitor, then the ADK web UI in the foreground
 # ------------------------------------------------------------
-python -m computer_use_agent.monitor_server --host "$MONITOR_HOST" --port "$MONITOR_PORT" \
+python -m cctv_audit.monitor_server --host "$MONITOR_HOST" --port "$MONITOR_PORT" \
     >/tmp/cctv_audit_monitor.log 2>&1 &
 MONITOR_PID=$!
 
@@ -123,4 +123,4 @@ echo "  💬 ADK web:    http://127.0.0.1:$PORT/dev-ui/"
 echo "  📺 Monitor:    http://$MONITOR_HOST:$MONITOR_PORT/   (log: /tmp/cctv_audit_monitor.log)"
 echo "============================================================"
 
-exec adk web computer_use_agent --port "$PORT"
+exec adk web cctv_audit --port "$PORT"

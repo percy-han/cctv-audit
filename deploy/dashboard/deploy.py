@@ -122,7 +122,7 @@ def template(tag: str, token: str) -> dict:
                 "image": image,
                 "command": ["sh"],
                 "args": ["-c",
-                         "exec uvicorn computer_use_agent.monitor_server:app "
+                         "exec uvicorn cctv_audit.monitor_server:app "
                          "--host 0.0.0.0 --port ${PORT:-8080}"],
                 "ports": [{"name": "http1", "containerPort": 8080}],
                 "env": [

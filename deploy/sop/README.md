@@ -65,7 +65,7 @@ python deploy/sop/publish.py put chagee-store-v2 /tmp/v2.yaml
 
 ## YAML 长什么样
 
-字段说明写在 `computer_use_agent/analyzer/sop_rules.yaml` 的文件头注释里，
+字段说明写在 `cctv_audit/analyzer/sop_rules.yaml` 的文件头注释里，
 那份也是本地 `adk web` 跑的时候用的标准（`SOP_RULES_PATH`）。
 两个字段最容易写错，都在 `analyzer/sop.py` 里有对应逻辑：
 

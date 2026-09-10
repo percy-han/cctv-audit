@@ -6,6 +6,42 @@
 
 ---
 
+## 零、这东西部署在哪，先看这节
+
+一个仓库，**三个部署物，共用一个镜像**（`Dockerfile`），靠不同的启动命令区分。
+它们会各自漂移，这已经发生过四次——**改完代码三个都要重部**。
+
+| 跑在哪 | 入口 | 启动命令 | 部署脚本 |
+| :--- | :--- | :--- | :--- |
+| **Agent Runtime**（客户实际用的） | `cctv_audit/server.py` | `uvicorn cctv_audit.server:app` | `deploy/agent_runtime/` |
+| **Cloud Run**（实时大屏） | `cctv_audit/monitor_server.py` | `uvicorn cctv_audit.monitor_server:app` | `deploy/dashboard/` |
+| **本机**（开发和排障最快的通道） | `cctv_audit/agent.py` | `adk web cctv_audit` | `./start_web.sh` |
+
+客户那一侧的唯一入口是 **Gemini Enterprise**：在 GE 里 `@门店视频稽核` 说一句话，
+GE 把整轮对话交给 Agent Runtime 上的容器，容器自己分流到
+`preflight`（探测并复述给人确认）/ `start_audit`（后台跑）/ `get_status`（轮询）。
+**不 @ 会被 GE 自带助手接走**，而它答得像模像样，看不出没走到我们这儿。
+
+`deploy/` 按云资源分目录：`agent_runtime/`（引擎）、`dashboard/`、`demovideo/`（都是
+Cloud Run）、`ge/`（GE 里的 agent 注册）、`sop/`（GCS 上的版本化 SOP）、
+`phase0/`（早期探针，**留着是因为那四个平台数字的原始证据在里面**）。
+
+### 别的文档在哪
+
+| 文件 | 什么时候看 |
+| :--- | :--- |
+| **`STATUS.md`** | 现在线上跑的是哪个版本、下一步该干什么 |
+| **`TESTING.md`** | 怎么测。从 10 秒的单测到云上真 e2e，按见效速度排 |
+| **`CHANGES.md`** | 每个改动**为什么**这么做。踩过的坑基本都在这儿 |
+| `deploy/phase0/README.md` | GE 和 Agent Runtime 的四个实测结论及原始回包 |
+| `deploy/sop/README.md` | SOP 怎么写、怎么发版 |
+
+> **包名 2026-09-10 从 `computer_use_agent` 改成了 `cctv_audit`。**
+> 旧名字指的是导航失败时才启动的 Computer Use 兜底（`navigator/generic_agent.py`），
+> 拿一条兜底路径给整个包命名是反的。旧文档和旧链接里的路径按这个换算。
+
+---
+
 ## 一、它是怎么工作的
 
 ```
@@ -79,14 +115,14 @@ gcloud auth application-default login
 gcloud config set project <your-project-id>
 
 # 3. 配置
-cp computer_use_agent/.env.example computer_use_agent/.env
+cp cctv_audit/.env.example cctv_audit/.env
 # 至少填上 GOOGLE_CLOUD_PROJECT —— 代码故意不设默认项目
 
 # 4. 启动（首次会自动建 venv、装依赖、装 chromium）
 ./start_web.sh
 ```
 
-- 💬 对话控制台：`http://127.0.0.1:8000/dev-ui/`，选 `computer_use_agent`
+- 💬 对话控制台：`http://127.0.0.1:8000/dev-ui/`，选 `cctv_audit`
 - 📺 实时大屏：`http://127.0.0.1:8080/`
 
 在对话框里直接给地址即可，稽核区间写在同一句话里：
@@ -215,38 +251,61 @@ YAML 里还可以写 `visual_scan:` 段。它列出模型在下任何结论之�
 
 ## 七、项目结构
 
+**★ 标的是三个部署入口**，其余都是它们共享的。见第零节那张表。
+
 ```text
 cctv-audit/
-├── start_web.sh                 # 一键启动：查 ffmpeg、装依赖、拉起大屏 + ADK Web
+├── README.md                    # 这份
+├── STATUS.md CHANGES.md TESTING.md   # 现状 / 为什么这么改 / 怎么测
+├── Dockerfile                   # 一个镜像，三个入口共用
+├── start_web.sh                 # 本机一键启动：查 ffmpeg、装依赖、拉起大屏 + ADK Web
+├── check.sh                     # 收工自查；--deep 会从 GitHub 重新 clone 一份验
 ├── requirements.txt             # 运行时依赖（ffmpeg 是系统依赖，不在这里）
 ├── requirements-dev.txt         # 测试依赖
-├── tests/test_units.py          # 纯逻辑单测：时间映射、窗口切分、结果清洗、id 序列
-└── computer_use_agent/
-    ├── config.py                # 唯一的配置入口，其他模块不准调 os.getenv
-    ├── agent.py                 # ADK 入口：解析指令 → 驱动流水线 → 流式回报
+├── tests/                       # 480 个单测，不开浏览器、不连云、不花钱
+│   └── conftest.py              # 给整套测试钉一个假项目号，缺它 11 个测试会红
+├── deploy/                      # 一个目录一种云资源
+│   ├── agent_runtime/           # 引擎：建镜像 + 改镜像 + 直调排障
+│   ├── dashboard/               # 大屏那个 Cloud Run 服务
+│   ├── demovideo/               # 演示素材站（也是 Cloud Run）
+│   ├── ge/                      # 在 Gemini Enterprise 里注册 agent 和 chips
+│   ├── sop/                     # SOP 发版到 GCS，带 parse 校验和防覆盖
+│   └── phase0/                  # 早期探针 + 四个平台结论的原始回包，别删
+└── cctv_audit/
+    ├── server.py            ★   # 容器契约：GE 那唯一一个方法，进来后自己分流
+    ├── monitor_server.py    ★   # 大屏服务端（WebSocket 广播）
+    ├── agent.py             ★   # 本机 ADK 入口：解析指令 → 驱动流水线 → 流式回报
+    ├── monitor.py               # 大屏前端页面 + 推送客户端
+    ├── turn.py                  # 这轮对话该干哪件事（用模型判，不做关键词匹配）
+    ├── audit_service.py         # preflight / start_audit / get_status 三个方法本身
     ├── pipeline.py              # 采集协程 + 分析协程池 + 预算硬停止
+    ├── jobs.py                  # 单子 + 后台执行器；Firestore 按 user_id 分子集合
     ├── store.py                 # 唯一落盘入口 + 证据帧抽取
+    ├── artifacts.py             # 证据帧落本地还是落 GCS
+    ├── intent.py                # 读懂用户那句话（GE 那条路上降级为兜底）
+    ├── config.py                # 唯一的配置入口，其他模块不准调 os.getenv
     ├── gcp.py                   # 凭据与带重试的 generate_content
     ├── browser_actions.py       # 浏览器原子动作分发（只此一份）
+    ├── logsetup.py cpuprobe.py  # 日志；以及「容器是不是在挨饿」的探针
     ├── navigator/               # 确定性导航
     │   ├── base.py              # 协议 + 会话复用 + 验证码探测 + 人工闸门
     │   ├── bilibili.py          # 当前唯一的真实适配器
-    │   ├── generic_agent.py     # Computer Use 兜底（仅导航）
+    │   ├── generic_agent.py     # Computer Use 兜底（仅导航，包的旧名字来自这里）
     │   └── resilient.py         # 把上面两者缝起来：先确定性，失败再兜底
     ├── capture/                 # 采集
     │   ├── probe.py             # 探测能否抓流 → 决定 Plan A / Plan B
     │   ├── stream_grabber.py    # Plan A
     │   ├── screen_recorder.py   # Plan B
-    │   ├── preview.py           # 大屏那路画面（两个 Plan 都跑，与采集无关）
+    │   ├── gcs_video.py         # Plan C：桶里的视频文件，字节不进容器
+    │   ├── preview.py           # 大屏那路画面（三个 Plan 都跑，与采集无关）
     │   ├── window_assembler.py  # 定长切片 → 重叠窗口
     │   └── ffmpeg_util.py       # ffmpeg 定位、抽帧、URL 脱敏
-    ├── analyzer/                # 稽核
-    │   ├── sop_rules.yaml       # SOP 规则，改这里不用改代码
-    │   ├── sop_rules.drink_making.yaml  # 另一套标准，SOP_RULES_PATH 切换
-    │   ├── schema.py            # response_schema，强制结构化输出
-    │   └── video_analyzer.py    # 每窗口一次无状态调用
-    ├── monitor.py               # 大屏前端页面 + 推送客户端
-    └── monitor_server.py        # 大屏服务端（WebSocket 广播）
+    └── analyzer/                # 稽核
+        ├── sop.py               # 按 sop_id 去 GCS 取，取不到报错，不回落默认
+        ├── sop_rules.yaml       # 本机跑的默认 SOP，改这里不用改代码
+        ├── sop_rules.drink_making.yaml  # 另一套标准，SOP_RULES_PATH 切换
+        ├── schema.py            # response_schema，强制结构化输出
+        └── video_analyzer.py    # 每窗口一次无状态调用
 ```
 
 新增一个平台（海康/大华/第三方 SaaS）= 在 `navigator/` 加一个文件，主链路不动。

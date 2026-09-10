@@ -1,7 +1,7 @@
 # 调饮操作稽核规则 — 加冰顺序 / 手套 / 口罩帽子
 #
 # 一份独立的稽核标准，不是对 sop_rules.yaml 的修改。用 SOP_RULES_PATH 切换：
-#   SOP_RULES_PATH=computer_use_agent/analyzer/sop_rules.drink_making.yaml
+#   SOP_RULES_PATH=cctv_audit/analyzer/sop_rules.drink_making.yaml
 #
 # 与 sop_rules.yaml 的差别在于覆盖面：那份是《亚太稽核远程 CCTV 巡检业务流程》
 # 的 5 条门店通用项，这份只盯调饮台前的 3 件事，判定粒度更细。

@@ -329,7 +329,7 @@ Chromium 的投屏（screencast）**只在页面重绘的时候才吐帧**——
 6. Firestore 里几个测试单还挂着状态：`d7680d`、`f500e5`、`c70488`，
    外加这两天的 `8ff781` / `4e38e2` / `6c2e8d` / `60caa7` / `19c47f` /
    `692b53` / `e40125` / `1c8257`。
-7. `computer_use_agent/checkpoints/audit_records.jsonl` 里 3 条测试记录删不删，你定
+7. `cctv_audit/checkpoints/audit_records.jsonl` 里 3 条测试记录删不删，你定
    （里面有测试跑的证据帧，我不单方面删）。
 8. 提交和 PR 你自己来。
 

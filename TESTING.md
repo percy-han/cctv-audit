@@ -19,7 +19,7 @@
 
 `tests/conftest.py` 会给整套测试钉一个假的 `GCP_PROJECT`。不是可有可无的：
 有 11 个测试会真的构造 `AuditPipeline`，而它没有项目就拒绝建。
-在这台机器上项目本来来自 `computer_use_agent/.env`，而那个文件不进 git——
+在这台机器上项目本来来自 `cctv_audit/.env`，而那个文件不进 git——
 所以在补上 conftest 之前，这套测试**只在这台机器上是绿的**。原委见
 CHANGES.md「十二·十一」。
 
@@ -64,7 +64,7 @@ MONITOR_URL=http://127.0.0.1:8099 \
 `SOP_BUCKET` 不能省，preflight 会直接以「没有配置 SOP_BUCKET」退回。
 
 （先在另一个窗口起本地大屏：`MONITOR_HOST=127.0.0.1 MONITOR_PORT=8099
-.venv/bin/python -m computer_use_agent.monitor_server`。
+.venv/bin/python -m cctv_audit.monitor_server`。
 **收工记得停掉**：`kill "$(ss -lptn 'sport = :8099' | grep -oP 'pid=\K[0-9]+' | head -1)"`，
 **不要 `pkill -f`**——那个模式串在发起命令自己的命令行里，会把当前 shell 一起杀了。）
 
@@ -131,7 +131,7 @@ job e40125: done after 327s
 ```bash
 PYTHONPATH=$PWD .venv/bin/python - <<'EOF'
 import asyncio
-from computer_use_agent.capture import gcs_video
+from cctv_audit.capture import gcs_video
 
 URI = "gs://study-project-496907-cctv-audit/你的路径/视频.mp4"
 
@@ -254,7 +254,7 @@ PY
 ```
 
 > ~~**已知缺陷**：只看得到 uvicorn 的访问日志。~~
-> **2026-09-08 修了**（`computer_use_agent/logsetup.py`）。以前根本没有 root handler，
+> **2026-09-08 修了**（`cctv_audit/logsetup.py`）。以前根本没有 root handler，
 > Python 的兜底 handler 只放 WARNING 以上过，所以**跑成功的那些单子也一样没日志**——
 > 「没看到稽核日志」从来就不是「稽核死了」的证据。
 >
@@ -385,7 +385,7 @@ Plan A 下页面只是给人看的，原来就没开页面看门狗，也没人�
 而稽核是故意甩出请求之外跑的（流式那条路上，请求里的活会在 900.0s 被 cancel）。
 所以让稽核活下来的那个决定，正好就是让它挨饿的原因。
 
-量它的工具是新增的 `computer_use_agent/cpuprobe.py`，它每 15 秒往日志上打一行：
+量它的工具是新增的 `cctv_audit/cpuprobe.py`，它每 15 秒往日志上打一行：
 
 ```
 sched: thread tick median 83ms p90 83ms worst 132ms (asked 83ms, 179 in 15s);

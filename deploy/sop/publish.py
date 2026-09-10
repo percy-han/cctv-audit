@@ -52,7 +52,7 @@ sys.path.insert(0, str(ROOT))
 import google.auth  # noqa: E402
 from google.cloud import storage  # noqa: E402
 
-from computer_use_agent.analyzer.sop import parse_rules  # noqa: E402
+from cctv_audit.analyzer.sop import parse_rules  # noqa: E402
 
 PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "study-project-496907")
 BUCKET = os.environ.get("SOP_BUCKET", f"{PROJECT}-cctv-audit")

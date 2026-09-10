@@ -168,8 +168,8 @@ while IFS= read -r entry; do
         # The ignores we mean: environments, caches, scratch, secrets, output.
         # Drifting from .gitignore only costs a false alarm here, never a miss.
         .venv/|.git/|__pycache__/|*/__pycache__/|.pytest_cache/|.work/|auth/|node_modules/) continue ;;
-        computer_use_agent/.adk|computer_use_agent/.adk/|computer_use_agent/checkpoints/) continue ;;
-        computer_use_agent/.env|.DS_Store|BRD.md|SDD.md) continue ;;
+        cctv_audit/.adk|cctv_audit/.adk/|cctv_audit/checkpoints/) continue ;;
+        cctv_audit/.env|.DS_Store|BRD.md|SDD.md) continue ;;
     esac
     if [ -d "$entry" ]; then
         found="$(find "$entry" -type f \
@@ -249,7 +249,7 @@ if [ "$DEEP" = true ]; then
         # one. A check that cries wolf on every run stops being read.
         #
         # `diff --exclude` matches basenames, so a pattern like
-        # `computer_use_agent/.env` contributes `.env` -- which is what the old
+        # `cctv_audit/.env` contributes `.env` -- which is what the old
         # hand-written list said too.
         DIFF_EXCLUDES=(--exclude=.git)
         while IFS= read -r pattern; do

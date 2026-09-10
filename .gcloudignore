@@ -8,12 +8,12 @@
 # Live session cookies. Uploading these puts a logged-in session in a build
 # log and, if the Dockerfile ever COPYs the tree, in a registry image.
 auth/
-computer_use_agent/.env
+cctv_audit/.env
 *.env
 
 # Audit output: evidence frames are footage of identifiable people, and the
 # record trail names stores and times. None of it belongs in a build context.
-computer_use_agent/checkpoints/
+cctv_audit/checkpoints/
 .work/
 
 # Weight, not secrecy.
@@ -29,5 +29,5 @@ deploy/phase0/results/
 # Local `adk web` state: a session database from this workstation. It is not a
 # secret, but it does get COPYed into the image, where it is one more file
 # nobody put there on purpose.
-computer_use_agent/.adk/
+cctv_audit/.adk/
 .DS_Store

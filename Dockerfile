@@ -5,8 +5,8 @@
 # reading records written by a version of the store it does not share. The
 # entrypoint decides which one you get:
 #
-#   uvicorn computer_use_agent.server:app          the agent (default)
-#   uvicorn computer_use_agent.monitor_server:app  the dashboard
+#   uvicorn cctv_audit.server:app          the agent (default)
+#   uvicorn cctv_audit.monitor_server:app  the dashboard
 #
 # It is a big image (Chromium alone is ~400 MB) and there is no way around
 # that: Plan B captures the screen of a real browser, and Plan A still needs
@@ -46,7 +46,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install chromium
 
-COPY computer_use_agent ./computer_use_agent
+COPY cctv_audit ./cctv_audit
 
 # The container filesystem is temporary and the instance can be replaced
 # between two turns of the same conversation. Everything here is scratch;
@@ -66,4 +66,4 @@ EXPOSE 8080
 # --timeout-keep-alive well past the platform's own 900s cut, so that a
 # connection dying mid-turn is the platform's doing and not uvicorn's. Phase 0
 # spent a day telling those two apart; no reason to re-run that experiment.
-CMD ["sh", "-c", "exec uvicorn computer_use_agent.server:app --host 0.0.0.0 --port ${PORT:-8080} --timeout-keep-alive 3600"]
+CMD ["sh", "-c", "exec uvicorn cctv_audit.server:app --host 0.0.0.0 --port ${PORT:-8080} --timeout-keep-alive 3600"]

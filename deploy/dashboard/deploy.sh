@@ -62,7 +62,7 @@ gcloud run deploy "$SERVICE" \
   --service-account="$SA" \
   --no-allow-unauthenticated \
   --command=sh \
-  --args="^@^-c@exec uvicorn computer_use_agent.monitor_server:app --host 0.0.0.0 --port \${PORT:-8080}" \
+  --args="^@^-c@exec uvicorn cctv_audit.monitor_server:app --host 0.0.0.0 --port \${PORT:-8080}" \
   --port=8080 \
   --cpu=1 --memory=1Gi \
   `# One instance, always. The dashboard's state lives in a Python dict, so a` \
